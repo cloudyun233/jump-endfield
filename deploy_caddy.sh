@@ -139,6 +139,7 @@ configure_caddy() {
 {$DOMAIN} {
 	reverse_proxy https://${TARGET_DOMAIN} {
 		header_up Host "${TARGET_DOMAIN}"
+        http_port 0 # 禁用80
 	}
 }
 EOF

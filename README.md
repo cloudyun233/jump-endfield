@@ -164,6 +164,31 @@ sudo nft add rule ip nat prerouting udp dport 68 redirect to 443
 crontab -e
 0 20 * * * /sbin/reboot
 ```
+### nftables端口转发
+
+要启用nftables服务并配置端口转发，请执行以下命令：
+
+```bash
+# 启用nftables服务
+sudo systemctl enable nftables
+
+# 配置端口转发规则
+table inet nat { 
+    chain prerouting { 
+        type nat hook prerouting priority -100; policy accept; 
+ 
+        # 转发 UDP 853 端口到本机 UDP 443 端口 
+        # 注意：这里仍然是 UDP -> UDP 
+        udp dport 853 redirect to :443 
+ 
+        # 转发 UDP 1024-2048 端口范围到本机 UDP 443 端口 
+        # 注意：这里仍然是 UDP -> UDP 
+        udp dport 1024-2048 redirect to :443 
+    } 
+}
+```
+
+这些配置将UDP 853端口和1024-2048端口范围的流量重定向到443端口，可用于绕过某些网络环境中的端口限制。
 
 ## 许可证与致谢
 
