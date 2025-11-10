@@ -111,16 +111,16 @@ install_tools_by_pm() {
   case "$PM" in
     apt)
       apt-get update -y
-      apt-get install -y curl wget openssl coreutils bash grep passwd shadow || true
+      apt-get install -y curl wget openssl coreutils bash grep passwd shadow nano || true
       ;;
     yum)
-      yum install -y curl wget openssl coreutils bash grep shadow-utils || true
+      yum install -y curl wget openssl coreutils bash grep shadow-utils nano || true
       ;;
     dnf)
-      dnf install -y curl wget openssl coreutils bash grep shadow-utils || true
+      dnf install -y curl wget openssl coreutils bash grep shadow-utils nano || true
       ;;
     apk)
-      apk add --no-cache curl wget openssl bash grep shadow || true
+      apk add --no-cache curl wget openssl bash grep shadow nano || true
       apk add --no-cache -X http://dl-cdn.alpinelinux.org/alpine/edge/community findutils || true
       ;;
     *)

@@ -153,7 +153,7 @@ sudo nft add rule ip nat prerouting udp dport 68 redirect to 443
 ```
 
 3. 客户端使用53端口（或其他转发端口）连接
-
+4. 若服务器重启，需要重新配置端口转发规则。或者参考下面的nftables配置以持久化。
 ## 维护
 
 ### 定时重启任务
@@ -169,10 +169,9 @@ crontab -e
 要启用nftables服务并配置端口转发，请执行以下命令：
 
 ```bash
-# 启用nftables服务
-sudo systemctl enable nftables
-
-# 配置端口转发规则
+# 编辑nftables配置文件
+nano /etc/nftables.conf
+# 添加端口转发规则
 table inet nat { 
     chain prerouting { 
         type nat hook prerouting priority -100; policy accept; 
@@ -186,6 +185,8 @@ table inet nat {
         udp dport 1024-2048 redirect to :443 
     } 
 }
+# 启用nftables服务
+sudo systemctl enable nftables
 ```
 
 这些配置将UDP 853端口和1024-2048端口范围的流量重定向到443端口，可用于绕过某些网络环境中的端口限制。
