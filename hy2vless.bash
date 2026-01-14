@@ -347,7 +347,7 @@ if [[ "$INSTALL_XRAY" == "true" ]]; then
   "log": { "loglevel": "none" },
   "inbounds": [
     {
-      "listen": "0.0.0.0",
+      "listen": "::",
       "port": ${XRAY_PORT_TCP},
       "protocol": "vless",
       "settings": {
