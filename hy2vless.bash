@@ -371,7 +371,7 @@ if [[ "$INSTALL_XRAY" == "true" ]]; then
           "dest": "${REALITY_DEST}",
           "serverNames": ["${REALITY_SNI_JSON}"],
           "privateKey": "${XRAY_PRIV}",
-          "shortIds": ["","1234"]
+          "shortIds": ["","aqwsderf"]
         }
       },
       "sniffing": {
