@@ -110,7 +110,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/hea
   alpn:
     - h2
     - http/1.1
-  client-fingerprint: chrome
+  client-fingerprint: edge
   skip-cert-verify: true
   reality-opts:
     public-key: 脚本生成的X25519公钥
