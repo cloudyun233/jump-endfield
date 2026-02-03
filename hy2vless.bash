@@ -371,7 +371,7 @@ if [[ "$INSTALL_XRAY" == "true" ]]; then
           "dest": "${REALITY_DEST}",
           "serverNames": ["${REALITY_SNI_JSON}"],
           "privateKey": "${XRAY_PRIV}",
-          "shortIds": ["","aqwsderf"]
+          "shortIds": ["","135246"]
         }
       },
       "sniffing": {
@@ -674,7 +674,7 @@ after_exit(){
       echo "VLESS 连接要点："
       echo "  - UUID: ${VLESS_UUID}"
       echo "  - X25519 public: ${XRAY_PUB}"
-      echo "  - shortIds:可以不填写或填写1234"
+      echo "  - shortIds:可以不填写或填写135246"
       echo
     fi
 
