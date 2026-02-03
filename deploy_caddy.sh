@@ -12,7 +12,7 @@ YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
 # --- 全局变量 ---
-TARGET_DOMAIN="www.yuzu-soft.com"
+TARGET_DOMAIN="www.cho-kaguyahime.com"
 
 # --- 检查 Root 权限 ---
 check_root() {
