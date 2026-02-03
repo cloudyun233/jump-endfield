@@ -137,7 +137,7 @@ setup_environment
 ###############################################################################
 
 # 全局变量 - 目标域名
-TARGET_DOMAIN="www.yuzu-soft.com"
+TARGET_DOMAIN="www.cho-kaguyahime.com"
 
 # 默认值
 XRAY_PORT_TCP=443
