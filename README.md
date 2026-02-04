@@ -177,20 +177,19 @@ table inet nat {
     chain prerouting { 
         type nat hook prerouting priority -100; policy accept; 
  
-        # 转发 UDP 853 端口到本机 UDP 443 端口 
+        # 转发指定UDP端口到本机UDP 443端口 
         # 注意：这里仍然是 UDP -> UDP 
-        udp dport 853 redirect to :443 
+        udp dport {2053, 2083, 2087, 2096, 8443} redirect to :443 
  
-        # 转发 UDP 1024-2048 端口范围到本机 UDP 443 端口 
-        # 注意：这里仍然是 UDP -> UDP 
-        udp dport 1024-2048 redirect to :443 
+        # 注释掉UDP 1024-2048端口范围的转发规则
+        # udp dport 1024-2048 redirect to :443 
     } 
 }
 # 启用nftables服务
 sudo systemctl enable nftables
 ```
 
-这些配置将UDP 853端口和1024-2048端口范围的流量重定向到443端口，可用于绕过某些网络环境中的端口限制。
+可用于绕过某些网络环境中的端口限制。
 
 ## 许可证与致谢
 
