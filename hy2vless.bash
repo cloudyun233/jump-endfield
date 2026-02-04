@@ -633,7 +633,7 @@ else
       fi
     }
 
-    set_sysctl "net.core.default_qdisc" "fq"
+    set_sysctl "net.core.default_qdisc" "fq_codel"
     set_sysctl "net.ipv4.tcp_congestion_control" "bbr"
 
     # 立刻生效（只加载 sysctl.conf）
