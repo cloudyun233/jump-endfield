@@ -106,7 +106,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/hea
   flow: xtls-rprx-vision
   packet-encoding: xudp
   tls: true
-  servername: www.yuzu-soft.com
+  servername: www.cho-kaguyahime.com
   alpn:
     - h2
     - http/1.1
