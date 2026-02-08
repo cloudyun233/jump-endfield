@@ -145,12 +145,14 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/hea
 2. 配置防火墙端口转发（以nftables为例）：
 
 ```bash
-# 将53端口(DNS)流量转发到443端口
-sudo nft add rule ip nat prerouting udp dport 53 redirect to 443
+# 将53端口(DNS) UDP流量转发到443端口
+sudo nft add rule inet nat prerouting udp dport 53 dnat to :443
 
-# 添加其他常用端口
-sudo nft add rule ip nat prerouting udp dport 67 redirect to 443
-sudo nft add rule ip nat prerouting udp dport 68 redirect to 443
+# 67端口（DHCP服务器）
+sudo nft add rule inet nat prerouting udp dport 67 dnat to :443
+
+# 68端口（DHCP客户端）
+sudo nft add rule inet nat prerouting udp dport 68 dnat to :443
 ```
 
 3. 客户端使用53端口（或其他转发端口）连接
@@ -173,17 +175,20 @@ crontab -e
 # 编辑nftables配置文件
 nano /etc/nftables.conf
 # 添加端口转发规则
-table inet nat { 
-    chain prerouting { 
-        type nat hook prerouting priority -100; policy accept; 
- 
-        # 转发指定UDP端口到本机UDP 443端口 
-        # 注意：这里仍然是 UDP -> UDP 
-        udp dport {2053, 2083, 2087, 2096, 8443} redirect to :443 
- 
-        # 注释掉UDP 1024-2048端口范围的转发规则
-        # udp dport 1024-2048 redirect to :443 
-    } 
+table inet nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        # 转发指定UDP端口到本机UDP 443端口（用于Hysteria2端口跳跃）
+        udp dport {2053, 2083, 2087, 2096, 8443} dnat to :443
+
+        # 大范围端口跳跃可用
+        # udp dport 10240-20480 dnat to :443
+        # 特殊需求可用
+        # udp dport 53 dnat to :443
+        # udp dport 67 dnat to :443
+        # udp dport 68 dnat to :443
+    }
 }
 # 启用nftables服务
 sudo systemctl enable nftables
