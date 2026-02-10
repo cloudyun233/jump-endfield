@@ -598,67 +598,12 @@ fi
 ###############################################################################
 # 检测并开启 BBR
 ###############################################################################
-info "检测并开启 BBR (TCP 拥塞控制算法)..."
-
-# 解析内核主/次版本（如 5.10）
-KERNEL_VERSION=$(uname -r | cut -d- -f1)   # 去掉 -generic 等后缀
-KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
-KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
-
-# 比较版本：需要 >= 4.9
-if [ -z "$KERNEL_MAJOR" ] || [ -z "$KERNEL_MINOR" ]; then
-  warn "无法解析内核版本: '$KERNEL_VERSION'"
-else
-  if [ "$KERNEL_MAJOR" -gt 4 ] || { [ "$KERNEL_MAJOR" -eq 4 ] && [ "$KERNEL_MINOR" -ge 9 ]; }; then
-    info "内核版本 ${KERNEL_VERSION} 支持 BBR（>= 4.9）"
-    # 尝试加载模块（若内核编译为模块）
-    if ! lsmod | grep -q '^tcp_bbr'; then
-      info "尝试加载 tcp_bbr 模块..."
-      if modprobe tcp_bbr 2>/dev/null; then
-        info "tcp_bbr 模块加载成功"
-      else
-        warn "无法通过 modprobe 加载 tcp_bbr（可能已编进内核或内核不支持）。继续尝试设置 sysctl。"
-      fi
-    else
-      info "tcp_bbr 模块已加载"
-    fi
-
-    # 幂等地设置 /etc/sysctl.conf（替换已存在的项或追加）
-    set_sysctl() {
-      key="$1"; val="$2"
-      if grep -q -E "^\s*${key}\s*=" /etc/sysctl.conf 2>/dev/null; then
-        sed -ri "s|^\s*(${key})\s*=.*|\1=${val}|" /etc/sysctl.conf
-      else
-        echo "${key}=${val}" >> /etc/sysctl.conf
-      fi
-    }
-
-    set_sysctl "net.core.default_qdisc" "fq_codel"
-    set_sysctl "net.ipv4.tcp_congestion_control" "bbr"
-
-    # 立刻生效（只加载 sysctl.conf）
-    if sysctl -p /etc/sysctl.conf >/dev/null 2>&1; then
-      info "sysctl 配置已加载 (/etc/sysctl.conf)"
-    else
-      warn "sysctl -p 加载 /etc/sysctl.conf 时出现问题，尝试 sysctl --system"
-      sysctl --system || warn "sysctl --system 也失败，请手动检查"
-    fi
-
-    # 验证
-    CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
-    CURRENT_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "")
-    if [ "$CURRENT_CC" = "bbr" ]; then
-      info "BBR 已成功设置为 tcp_congestion_control=$CURRENT_CC"
-    else
-      warn "设置后检测到 tcp_congestion_control=$CURRENT_CC（期望 bbr）。"
-      warn "可尝试：modprobe tcp_bbr; dmesg | tail -n 50 查找相关报错；或确认内核是否启用 CONFIG_TCP_CONG_BBR"
-    fi
-    info "当前默认 qdisc = $CURRENT_QDISC"
-
-  else
-    warn "内核版本 ${KERNEL_VERSION} 不支持 BBR，需要 4.9 或更高版本"
-  fi
-fi
+info "BBR 设置提示"
+###############################################################################
+echo
+echo "如需开启 BBR v3，请运行以下命令："
+echo "  bash <(curl -L -s https://raw.githubusercontent.com/byJoey/Actions-bbr-v3/refs/heads/main/install.sh)"
+echo
 
 ###############################################################################
 # 输出结果
