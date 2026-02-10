@@ -391,8 +391,8 @@ clear_config(){
     info "配置已清除。"
 }
 
-run_test_script(){ bash <(curl -fsSL https://github.com/xykt/ScriptMenu); }
-run_bbr(){ bash <(curl -fsSL https://github.com/byJoey/Actions-bbr-v3); }
+run_test_script(){ bash <(curl -Ls Check.Place); }
+run_bbr(){ bash <(curl -l -s https://raw.githubusercontent.com/byJoey/Actions-bbr-v3/refs/heads/main/install.sh); }
 uninstall_singbox(){ 
     rm -rf "$SINGBOX_BIN" "$SINGBOX_CONF_DIR"
     if [[ "$RELEASE" == "alpine" ]]; then
