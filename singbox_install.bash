@@ -99,14 +99,16 @@ restart_singbox(){
 
 # 2. Sing-box 安装
 install_singbox(){
-    info "正在安装 Sing-box..."
-    # 始终首先尝试官方脚本，但如果失败或需要特定控制，则使用备用方法。
-    # 对于此健壮脚本，我们尝试直接二进制安装以确保控制路径和服务文件。
+    info "正在安装 Sing-box (手动二进制方式)..."
     
+    # [新增] 预清理，确保通配符匹配准确
+    rm -rf sing-box.tar.gz sing-box-*/
+
+    # 获取版本号
     LATEST_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     if [[ -z "$LATEST_VER" ]]; then
         warn "获取最新版本失败，使用硬编码的备用版本。"
-        LATEST_VER="1.12.21" # 备用版本
+        LATEST_VER="1.12.21" 
     fi
     
     ARCH=$(uname -m)
@@ -118,14 +120,31 @@ install_singbox(){
     
     URL="https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VER}/sing-box-${LATEST_VER}-linux-${S_ARCH}.tar.gz"
     info "正在下载 Sing-box v$LATEST_VER ($S_ARCH)..."
-    wget -O sing-box.tar.gz "$URL"
+    
+    # [优化] 增加下载成功检查
+    if ! wget -O sing-box.tar.gz "$URL"; then
+        err "下载 Sing-box 失败，请检查网络！"
+        exit 1
+    fi
+
     tar -zxvf sing-box.tar.gz
     
-    # 查找二进制文件（文件夹名称可能不同）
-    mv sing-box-*/sing-box "$SINGBOX_BIN"
-    rm -rf sing-box*
-    chmod +x "$SINGBOX_BIN"
+    # [优化] 确保目标二进制目录存在
+    mkdir -p "$(dirname "$SINGBOX_BIN")"
+    
+    # 查找并移动二进制文件
+    if ls sing-box-*/sing-box >/dev/null 2>&1; then
+        mv sing-box-*/sing-box "$SINGBOX_BIN"
+        chmod +x "$SINGBOX_BIN"
+    else
+        err "解压后未找到二进制文件！"
+        exit 1
+    fi
 
+    # 清理现场
+    rm -rf sing-box.tar.gz sing-box-*/
+
+    # 配置处理
     mkdir -p "$SINGBOX_CONF_DIR"
     if [[ ! -f "$SINGBOX_CONF_PATH" ]]; then
         echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
