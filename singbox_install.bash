@@ -408,9 +408,34 @@ uninstall_singbox(){
 }
 
 configure_cron_reboot(){
+    info "正在检查并配置系统时间为 UTC..."
+    
+    # 检查当前时区
+    current_timezone=$(timedatectl show --property=Timezone --value 2>/dev/null || date +%Z)
+    
+    if [[ "$current_timezone" != "UTC" ]]; then
+        info "当前时区不是 UTC，正在设置为 UTC..."
+        if command -v timedatectl &>/dev/null; then
+            timedatectl set-timezone UTC
+            info "时区已设置为 UTC"
+        else
+            # 备用方案：手动设置
+            if [[ -f /etc/localtime ]]; then
+                rm -f /etc/localtime
+            fi
+            ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+            info "时区已设置为 UTC (通过符号链接)"
+        fi
+    else
+        info "当前时区已经是 UTC"
+    fi
+    
+    # 显示当前时间
+    info "当前系统时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    
     info "正在配置每天 20:00 UTC 重启。"
     # 检查是否存在
-    crontab -l | grep -v "/sbin/reboot" > mycron
+    crontab -l 2>/dev/null | grep -v "/sbin/reboot" > mycron || true
     echo "0 20 * * * /sbin/reboot" >> mycron
     crontab mycron
     rm mycron
