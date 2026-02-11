@@ -519,7 +519,7 @@ show_menu(){
     echo "6. 清除singbox配置"
     echo "7. 卸载 Sing-box"
     echo "8. 服务器相关测试"
-    echo "9. 安装 BBR"
+    echo "9. 安装 BBRv3(若想要更好的优化,可前往https://xanmod.org/)"
     echo "10. 自动重启 (20:00 UTC)"
     echo "0. 退出"
     read -rp "选择: " choice
