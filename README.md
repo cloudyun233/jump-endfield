@@ -1,4 +1,5 @@
 # VLESS+XTLS+REALITY 与 Hysteria2 一键安装脚本
+# 施工中，正在逐步迁移，原脚本可用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-blue.svg)](https://www.gnu.org/software/bash/)
