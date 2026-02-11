@@ -202,51 +202,128 @@ get_preferred_port(){
     echo "8443"
 }
 
-configure_forwarding(){
-    local hops="$1" # 逗号分隔
+configure_dnat(){
+    local hops="$1"
     local dest_port="$2"
-    local protocol="$3" # "hy2" or "tuic"
-    
+
     IFS=',' read -ra HOP_PORTS <<< "$hops"
     
+    # 清除现有规则提示
+    info "正在清除由于端口跳跃设置的旧防火墙转发规则..."
+    
     if command -v firewall-cmd >/dev/null; then
-        info "正在配置 Firewalld 转发 ($protocol)..."
-        # Firewalld 通常需要启用伪装
+        # Firewalld logic
+        # 尝试清除所有转发到 dest_port 的规则 (Best effort)
+        # 这是一个简化的清除，实际上 firewalld 很难精确清除未知的转发，除非我们遍历所有端口。
+        # 这里我们假设用户使用的是我们默认的端口或者之前的端口。
+        # 由于无法确切知道之前的 hops，这里我们发出警告，但执行重载。
+        # 为了真正清除，我们需要列出所有 forward-port 并删除。
+        
+        # 获取所有 forward-ports
+        fw_forwards=$(firewall-cmd --list-forward-ports)
+        if [[ -n "$fw_forwards" ]]; then
+            echo "$fw_forwards" | while read -r rule; do
+                # 格式: port=8443:proto=udp:toport=443:toaddr=
+                # 我们只关心 toport=$dest_port 的规则，或者是我们之前定义的跳跃端口。
+                # 简单起见，我们只能清除完全匹配的，或者提示用户。
+                # 鉴于脚本复杂性，这里我们只做添加。如果用户想要清除旧的，建议手动重置 firewalld。
+                warn "Firewalld 模式下，自动清除旧的自定义端口转发可能不完全。建议定期检查 firewall-cmd --list-forward-ports"
+            done
+        fi
+        
+        # 无论如何，添加新的
+        info "正在配置 Firewalld 转发..."
         firewall-cmd --permanent --add-masquerade
-        # Firewalld 没有简单的“刷新特定协议规则”的方法，如果不重置所有规则的话。
-        # 这里我们假设覆盖是主要目标。
-        # 对于 firewalld，add-forward-port 会覆盖相同的端口规则。
         for hop in "${HOP_PORTS[@]}"; do
+            # 移除旧的（如果完全匹配）- 尝试移除常见默认值
+            firewall-cmd --permanent --remove-forward-port=port=${hop}:proto=udp:toport=${dest_port} 2>/dev/null || true
+            
+            # 添加新的
             firewall-cmd --permanent --add-forward-port=port=${hop}:proto=udp:toport=${dest_port}
             firewall-cmd --permanent --add-port=${hop}/udp
         done
         firewall-cmd --reload
+        info "Firewalld 规则已应用。"
+
     elif command -v nft >/dev/null; then
-        info "正在配置 NFTables 转发 ($protocol)..."
+        info "正在配置 NFTables 转发..."
+        
+        # NFTables 容易清除：直接刷新 singbox_nat 表
+        # 这会清除所有由本脚本管理的 NAT 规则
+        nft flush table inet singbox_nat 2>/dev/null || true
+        
+        # 重建表和链
         nft add table inet singbox_nat 2>/dev/null || true
         nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; } 2>/dev/null || true
         
-        # 创建协议专用链
-        local chain_name="singbox_${protocol}"
+        local chain_name="singbox_dnat"
         nft add chain inet singbox_nat "$chain_name" 2>/dev/null || true
         
-        # 确保主链跳转到专用链
-        # 检查是否已经有跳转规则，没有则添加
+        # 确保跳转
         if ! nft list chain inet singbox_nat prerouting | grep -q "jump $chain_name"; then
             nft add rule inet singbox_nat prerouting jump "$chain_name"
         fi
         
-        # 刷新协议专用链
-        nft flush chain inet singbox_nat "$chain_name"
-        
-        # 添加规则到专用链
+        # 添加规则
         nft add rule inet singbox_nat "$chain_name" udp dport { $hops } dnat to :$dest_port
         
-        # 确保在过滤器中接受
-        open_port "$dest_port" "udp"
+        # 开放端口
+        # 注意：这里我们开放所有跳跃端口，使用集合语法
+        # 确保 filter 表存在
+        nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
+        if [[ -z "$nfthandel" ]]; then
+            nft add table inet singbox_filter 2>/dev/null || true
+            nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } 2>/dev/null || true
+        fi
+        # 允许这些端口 (直接使用 hops 变量，因为它已经包含了逗号分隔列表，适合 nft 集合语法)
+        nft add rule inet singbox_filter input udp dport { $hops } accept
         
         nft list ruleset > "$NFT_CONF"
+        info "NFTables 规则已更新并保存。"
     fi
+}
+
+config_port_hopping(){
+    # Firewalld 警告 + 二次确认
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        warn "检测到您使用的是 Firewalld（常见于 CentOS/RHEL 等 RedHat 系系统）。"
+        warn "端口跳跃功能在 Firewalld 下有明显限制："
+        warn "  • 不支持端口范围（如 2000-3000）"
+        warn "  • 旧转发规则难以彻底清除，可能残留"
+        warn "强烈建议使用 nftables 系统（如 Debian/Ubuntu/Alpine）以获得完整功能。"
+        echo
+        read -rp "是否仍要继续配置？[y/N]: " force
+        [[ "$force" =~ ^[Yy]$ ]] || { info "已取消操作。"; return; }
+    fi
+
+    info "正在配置防火墙转发 (端口跳跃)..."
+    
+    # 获取目的端口
+    local default_dest="443"
+    read -rp "请输入目标端口 (即 Hy2/TUIC 实际监听的端口) [默认: $default_dest]: " dest_port
+    dest_port=${dest_port:-$default_dest}
+    
+    # 获取跳跃端口
+    local default_hops="443,2053,2083,2087,2096,8443"
+    echo "请输入接收端口（多个端口用逗号分隔，支持范围如 2000-3000，但 Firewalld 不支持范围）"
+    read -rp "默认 [$default_hops]: " input_ports
+    input_ports=${input_ports:-$default_hops}
+    
+    # 简单去空格，防止 nftables 语法错误（用户输入 443, 2053 这种）
+    input_ports="${input_ports// /}"
+
+    # 确认信息
+    echo "--------------------------------"
+    echo "目标端口: $dest_port"
+    echo "跳转端口: $input_ports"
+    echo "--------------------------------"
+    read -rp "确认配置？这将覆盖现有的端口跳跃规则 [Y/n]: " confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        info "已取消。"
+        return
+    fi
+    
+    configure_dnat "$input_ports" "$dest_port"
 }
 
 # 3. 辅助函数：生成随机凭证
@@ -320,13 +397,7 @@ config_hy2(){
         tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, certificate_path: $cert, key_path: $key}')
     fi
 
-    read -rp "启用端口跳变? [Y/n]: " hop_choice
-    if [[ ! "$hop_choice" =~ ^[Nn]$ ]]; then
-        local default_hops="2053,2083,2087,2096,8443"
-        read -rp "跳变端口 [$default_hops]: " hops
-        hops=${hops:-$default_hops}
-        configure_forwarding "$hops" "$port" "hy2"
-    fi
+    # 端口跳变逻辑已移除，移至主菜单单独配置
 
     local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" \
         '{type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: ($port|tonumber), network: "udp", users: [{password: $pass}], tls: $tls}')
@@ -364,13 +435,7 @@ config_tuic(){
     fi
     
     # TUIC 端口跳变
-    read -rp "为 TUIC 启用端口跳变? [Y/n]: " hop_choice
-    if [[ ! "$hop_choice" =~ ^[Nn]$ ]]; then
-        local default_hops="3053,3083,3087"
-        read -rp "跳变端口 [$default_hops]: " hops
-        hops=${hops:-$default_hops}
-        configure_forwarding "$hops" "$port" "tuic"
-    fi
+    # TUIC 端口跳变逻辑已移除，移至主菜单单独配置
 
     local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg pass "$password" --argjson tls "$tls_config" \
         '{type: "tuic", tag: "tuic-in", listen: "::", listen_port: ($port|tonumber), network: "udp", users: [{uuid: $uuid, password: $pass}], congestion_control: "bbr", tls: $tls}')
@@ -450,11 +515,12 @@ show_menu(){
     echo "2. 配置 VLESS Reality (Vision)"
     echo "3. 配置 Hysteria2"
     echo "4. 配置 TUIC v5"
-    echo "5. 清除配置"
-    echo "6. 服务器测试 (ScriptMenu)"
-    echo "7. 安装 BBR"
-    echo "8. 卸载 Sing-box"
-    echo "9. 自动重启 (20:00 UTC)"
+    echo "5. 配置防火墙转发 (端口跳跃)(redhat系防火墙不建议使用)"
+    echo "6. 清除singbox配置"
+    echo "7. 卸载 Sing-box"
+    echo "8. 服务器相关测试"
+    echo "9. 安装 BBR"
+    echo "10. 自动重启 (20:00 UTC)"
     echo "0. 退出"
     read -rp "选择: " choice
     case $choice in
@@ -462,11 +528,12 @@ show_menu(){
         2) config_vless ;;
         3) config_hy2 ;;
         4) config_tuic ;;
-        5) clear_config ;;
-        6) run_test_script ;;
-        7) run_bbr ;;
-        8) uninstall_singbox ;;
-        9) configure_cron_reboot ;;
+        5) config_port_hopping ;;
+        6) clear_config ;;
+        7) uninstall_singbox ;;
+        8) run_test_script ;;
+        9) run_bbr ;;
+        10) configure_cron_reboot ;;
         0) exit 0 ;;
         *) echo "无效选择";;
     esac
