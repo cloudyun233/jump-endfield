@@ -1,0 +1,17 @@
+# IDE and editor files
+.vscode/
+
+# OS generated files
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Build artifacts
+build/
+dist/
