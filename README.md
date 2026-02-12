@@ -14,8 +14,8 @@
 
 ## 运行教程
 
-### 在线运行
-直接访问 GitHub Pages：[点击游玩](https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/index.html)
+### 运行
+下载index.html就能玩
 
 ## 操作说明
 
