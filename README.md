@@ -12,4 +12,13 @@
 
 **再次声明**：本仓库与 Hypergryph / 鹰角网络 / Endfield 无任何关联。
 
+## 运行教程
+
+### 在线运行（最简）
+直接在终端中执行以下命令：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/heads/main/jump_animation.sh)
+```
+
 玩得开心～ 🪂
