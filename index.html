@@ -264,9 +264,8 @@
         </header>
 
         <nav class="menu">
-            <button class="menu-btn active" data-mode="double-jump">双跳演示</button>
-            <button class="menu-btn" data-mode="parkour">跑酷模式</button>
-            <button class="menu-btn" data-mode="wall-cling">卡墙技巧</button>
+            <button class="menu-btn active" data-mode="endless-runner">无限跑酷</button>
+            <button class="menu-btn" data-mode="double-jump">双跳演示</button>
             <button class="menu-btn" data-mode="meme">Meme实验</button>
         </nav>
 
@@ -275,9 +274,9 @@
                 <canvas id="gameCanvas"></canvas>
             </div>
             <div class="stats" id="stats">
-                <div>跳跃次数: <span id="jumpCount">0</span></div>
-                <div>空中跳跃: <span id="airJump">0</span></div>
-                <div>最高点: <span id="maxHeight">0</span>m</div>
+                <div>距离: <span>0m</span></div>
+                <div>最高记录: <span>0m</span></div>
+                <div>速度: <span>5</span></div>
             </div>
             <div class="jump-indicator">
                 <span class="jump-count" id="jumpIndicator">双跳就绪!</span>
@@ -287,16 +286,12 @@
 
         <div class="controls">
             <div class="control-hint">
-                <span class="key">A/D</span>
-                <span>左右移动</span>
-            </div>
-            <div class="control-hint">
                 <span class="key">空格/W</span>
                 <span>跳跃 (可双跳)</span>
             </div>
             <div class="control-hint">
                 <span class="key">R</span>
-                <span>重置位置</span>
+                <span>重新开始</span>
             </div>
         </div>
 
@@ -315,8 +310,14 @@
         const memeContainer = document.getElementById('memeContainer');
         const jumpIndicator = document.getElementById('jumpIndicator');
 
-        let currentMode = 'double-jump';
+        let currentMode = 'endless-runner';
         let animationId = null;
+        let gameOver = false;
+        let distance = 0;
+        let highScore = 0;
+        let cameraX = 0;
+        let gameSpeed = 5;
+        let speedIncrease = 0.001;
 
         function resizeCanvas() {
             const container = canvas.parentElement;
@@ -327,7 +328,7 @@
         window.addEventListener('resize', resizeCanvas);
 
         const player = {
-            x: 100,
+            x: 150,
             y: 300,
             width: 40,
             height: 60,
@@ -337,16 +338,13 @@
             jumpsLeft: 2,
             maxJumps: 2,
             color: '#00d4ff',
-            trail: [],
-            wallClinging: false,
-            wallSide: 0
+            trail: []
         };
 
         const platforms = [];
         const particles = [];
         const gravity = 0.6;
         const jumpForce = -14;
-        const moveSpeed = 5;
         const friction = 0.85;
 
         let jumpCount = 0;
@@ -366,18 +364,40 @@
             platforms.length = 0;
             const groundY = canvas.height - 50;
             
-            platforms.push({ x: 0, y: groundY, width: canvas.width, height: 50, color: '#2a4a6a' });
-            
-            if (currentMode === 'parkour') {
-                platforms.push({ x: 200, y: groundY - 100, width: 150, height: 20, color: '#4a2a6a' });
-                platforms.push({ x: 450, y: groundY - 180, width: 120, height: 20, color: '#6a2a4a' });
-                platforms.push({ x: 650, y: groundY - 250, width: 100, height: 20, color: '#2a6a4a' });
-                platforms.push({ x: 850, y: groundY - 150, width: 130, height: 20, color: '#4a6a2a' });
+            if (currentMode === 'endless-runner') {
+                platforms.push({ x: 0, y: groundY, width: 600, height: 50, color: '#2a4a6a' });
+                generatePlatforms(600);
+            } else {
+                platforms.push({ x: 0, y: groundY, width: canvas.width, height: 50, color: '#2a4a6a' });
             }
+        }
+
+        function generatePlatforms(fromX) {
+            const groundY = canvas.height - 50;
+            const colors = ['#4a2a6a', '#6a2a4a', '#2a6a4a', '#4a6a2a', '#6a4a2a'];
+            let lastX = fromX;
             
-            if (currentMode === 'wall-cling') {
-                platforms.push({ x: canvas.width - 100, y: 100, width: 30, height: canvas.height - 150, color: '#6a4a2a', isWall: true });
-                platforms.push({ x: 70, y: 100, width: 30, height: canvas.height - 150, color: '#6a4a2a', isWall: true });
+            while (lastX < cameraX + canvas.width + 500) {
+                const gap = 80 + Math.random() * 120;
+                const width = 80 + Math.random() * 150;
+                const heightVariation = Math.random() > 0.5 ? -50 - Math.random() * 100 : 0;
+                const y = groundY + heightVariation;
+                
+                platforms.push({
+                    x: lastX + gap,
+                    y: y,
+                    width: width,
+                    height: 20,
+                    color: colors[Math.floor(Math.random() * colors.length)]
+                });
+                
+                lastX = lastX + gap + width;
+            }
+        }
+
+        function removeOldPlatforms() {
+            while (platforms.length > 0 && platforms[0].x + platforms[0].width < cameraX - 100) {
+                platforms.shift();
             }
         }
 
@@ -421,10 +441,12 @@
         }
 
         function drawPlayer() {
-            player.trail.push({ x: player.x + player.width / 2, y: player.y + player.height / 2 });
+            const screenX = player.x - cameraX;
+            
+            player.trail.push({ x: screenX + player.width / 2, y: player.y + player.height / 2 });
             if (player.trail.length > 10) player.trail.shift();
 
-            if (currentMode === 'double-jump' || player.vy < 0) {
+            if (player.vy < 0) {
                 ctx.beginPath();
                 player.trail.forEach((pos, i) => {
                     const alpha = i / player.trail.length * 0.3;
@@ -435,49 +457,50 @@
                 });
             }
 
-            const gradient = ctx.createLinearGradient(player.x, player.y, player.x + player.width, player.y + player.height);
-            gradient.addColorStop(0, player.wallClinging ? '#ff6b6b' : '#00d4ff');
-            gradient.addColorStop(1, player.wallClinging ? '#e040fb' : '#7b2cbf');
+            const gradient = ctx.createLinearGradient(screenX, player.y, screenX + player.width, player.y + player.height);
+            gradient.addColorStop(0, '#00d4ff');
+            gradient.addColorStop(1, '#7b2cbf');
 
             ctx.fillStyle = gradient;
-            ctx.shadowColor = player.wallClinging ? '#ff6b6b' : '#00d4ff';
+            ctx.shadowColor = '#00d4ff';
             ctx.shadowBlur = 20;
 
             ctx.beginPath();
-            ctx.roundRect(player.x, player.y, player.width, player.height, 10);
+            ctx.roundRect(screenX, player.y, player.width, player.height, 10);
             ctx.fill();
 
             ctx.shadowBlur = 0;
 
             ctx.fillStyle = '#fff';
             ctx.beginPath();
-            ctx.arc(player.x + 12, player.y + 20, 5, 0, Math.PI * 2);
-            ctx.arc(player.x + 28, player.y + 20, 5, 0, Math.PI * 2);
+            ctx.arc(screenX + 12, player.y + 20, 5, 0, Math.PI * 2);
+            ctx.arc(screenX + 28, player.y + 20, 5, 0, Math.PI * 2);
             ctx.fill();
 
             ctx.fillStyle = '#1a1a2e';
             ctx.beginPath();
-            ctx.arc(player.x + 13, player.y + 21, 2, 0, Math.PI * 2);
-            ctx.arc(player.x + 29, player.y + 21, 2, 0, Math.PI * 2);
+            ctx.arc(screenX + 13, player.y + 21, 2, 0, Math.PI * 2);
+            ctx.arc(screenX + 29, player.y + 21, 2, 0, Math.PI * 2);
             ctx.fill();
 
             if (player.jumpsLeft < player.maxJumps) {
                 ctx.fillStyle = '#ffd700';
                 ctx.font = 'bold 16px Arial';
                 ctx.textAlign = 'center';
-                ctx.fillText(player.jumpsLeft > 0 ? '×1' : '×0', player.x + player.width / 2, player.y - 10);
+                ctx.fillText(player.jumpsLeft > 0 ? '×1' : '×0', screenX + player.width / 2, player.y - 10);
             }
         }
 
         function drawPlatforms() {
             platforms.forEach(p => {
-                const gradient = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.height);
+                const screenX = p.x - cameraX;
+                const gradient = ctx.createLinearGradient(screenX, p.y, screenX, p.y + p.height);
                 gradient.addColorStop(0, p.color);
                 gradient.addColorStop(1, '#1a1a3a');
                 
                 ctx.fillStyle = gradient;
                 ctx.beginPath();
-                ctx.roundRect(p.x, p.y, p.width, p.height, p.isWall ? 5 : 8);
+                ctx.roundRect(screenX, p.y, p.width, p.height, 8);
                 ctx.fill();
 
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
@@ -507,7 +530,6 @@
 
         function checkCollision() {
             player.onGround = false;
-            player.wallClinging = false;
 
             platforms.forEach(p => {
                 if (player.x < p.x + p.width &&
@@ -515,66 +537,75 @@
                     player.y < p.y + p.height &&
                     player.y + player.height > p.y) {
                     
-                    if (p.isWall) {
-                        player.wallClinging = true;
-                        player.wallSide = player.x < p.x ? 1 : -1;
-                        player.vx = 0;
-                        player.vy *= 0.5;
-                        player.jumpsLeft = player.maxJumps;
-                    } else {
-                        const overlapLeft = (player.x + player.width) - p.x;
-                        const overlapRight = (p.x + p.width) - player.x;
-                        const overlapTop = (player.y + player.height) - p.y;
-                        const overlapBottom = (p.y + p.height) - player.y;
+                    const overlapLeft = (player.x + player.width) - p.x;
+                    const overlapRight = (p.x + p.width) - player.x;
+                    const overlapTop = (player.y + player.height) - p.y;
+                    const overlapBottom = (p.y + p.height) - player.y;
 
-                        const minOverlapX = Math.min(overlapLeft, overlapRight);
-                        const minOverlapY = Math.min(overlapTop, overlapBottom);
+                    const minOverlapX = Math.min(overlapLeft, overlapRight);
+                    const minOverlapY = Math.min(overlapTop, overlapBottom);
 
-                        if (minOverlapY < minOverlapX) {
-                            if (overlapTop < overlapBottom) {
-                                player.y = p.y - player.height;
-                                player.vy = 0;
-                                player.onGround = true;
-                                player.jumpsLeft = player.maxJumps;
-                            } else {
-                                player.y = p.y + p.height;
-                                player.vy = 0;
-                            }
+                    if (minOverlapY < minOverlapX) {
+                        if (overlapTop < overlapBottom) {
+                            player.y = p.y - player.height;
+                            player.vy = 0;
+                            player.onGround = true;
+                            player.jumpsLeft = player.maxJumps;
                         } else {
-                            if (overlapLeft < overlapRight) {
-                                player.x = p.x - player.width;
-                            } else {
-                                player.x = p.x + p.width;
-                            }
-                            player.vx = 0;
+                            player.y = p.y + p.height;
+                            player.vy = 0;
                         }
+                    } else {
+                        if (overlapLeft < overlapRight) {
+                            player.x = p.x - player.width;
+                        } else {
+                            player.x = p.x + p.width;
+                        }
+                        player.vx = 0;
                     }
                 }
             });
         }
 
         function update() {
-            if (keys.left) player.vx = -moveSpeed;
-            else if (keys.right) player.vx = moveSpeed;
-            else player.vx *= friction;
+            if (gameOver) return;
 
-            if (!player.wallClinging) {
-                player.vy += gravity;
+            if (currentMode === 'endless-runner') {
+                player.x += gameSpeed;
+                cameraX = player.x - 150;
+                distance = Math.floor(player.x / 10);
+                gameSpeed += speedIncrease;
+                
+                generatePlatforms(player.x + canvas.width);
+                removeOldPlatforms();
             } else {
-                player.vy += gravity * 0.3;
-                player.vy = Math.min(player.vy, 3);
+                if (keys.left) player.vx = -5;
+                else if (keys.right) player.vx = 5;
+                else player.vx *= friction;
+
+                player.x += player.vx;
+                
+                if (player.x < 0) player.x = 0;
+                if (player.x + player.width > canvas.width) player.x = canvas.width - player.width;
             }
 
-            player.x += player.vx;
+            player.vy += gravity;
             player.y += player.vy;
-
-            if (player.x < 0) player.x = 0;
-            if (player.x + player.width > canvas.width) player.x = canvas.width - player.width;
 
             checkCollision();
 
             if (player.y > canvas.height) {
-                resetPlayer();
+                if (currentMode === 'endless-runner') {
+                    endGame();
+                } else {
+                    resetPlayer();
+                }
+            }
+
+            if (currentMode === 'endless-runner') {
+                if (player.x < cameraX - player.width) {
+                    endGame();
+                }
             }
 
             const currentHeight = Math.max(0, Math.floor((baseY - player.y) / 10));
@@ -611,8 +642,32 @@
             }
         }
 
+        function endGame() {
+            gameOver = true;
+            if (distance > highScore) {
+                highScore = distance;
+            }
+            
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = '#ff6b6b';
+            ctx.font = 'bold 48px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('游戏结束!', canvas.width / 2, canvas.height / 2 - 60);
+            
+            ctx.fillStyle = '#ffd700';
+            ctx.font = 'bold 28px Arial';
+            ctx.fillText(`距离: ${distance}m`, canvas.width / 2, canvas.height / 2);
+            ctx.fillText(`最高记录: ${highScore}m`, canvas.width / 2, canvas.height / 2 + 40);
+            
+            ctx.fillStyle = '#00d4ff';
+            ctx.font = '20px Arial';
+            ctx.fillText('按 空格键 或 R 重新开始', canvas.width / 2, canvas.height / 2 + 100);
+        }
+
         function resetPlayer() {
-            player.x = 100;
+            player.x = currentMode === 'endless-runner' ? 150 : 100;
             player.y = canvas.height - 150;
             player.vx = 0;
             player.vy = 0;
@@ -622,10 +677,35 @@
             jumpIndicator.style.color = '#e040fb';
         }
 
+        function resetGame() {
+            gameOver = false;
+            distance = 0;
+            gameSpeed = 5;
+            cameraX = 0;
+            jumpCount = 0;
+            airJumpCount = 0;
+            maxHeight = 0;
+            platforms.length = 0;
+            particles.length = 0;
+            initPlatforms();
+            resetPlayer();
+        }
+
         function updateStats() {
-            document.getElementById('jumpCount').textContent = jumpCount;
-            document.getElementById('airJump').textContent = airJumpCount;
-            document.getElementById('maxHeight').textContent = maxHeight;
+            const statsDiv = document.getElementById('stats');
+            if (currentMode === 'endless-runner') {
+                statsDiv.innerHTML = `
+                    <div>距离: <span id="jumpCount">${distance}m</span></div>
+                    <div>最高记录: <span id="airJump">${highScore}m</span></div>
+                    <div>速度: <span id="maxHeight">${Math.floor(gameSpeed * 10) / 10}</span></div>
+                `;
+            } else {
+                statsDiv.innerHTML = `
+                    <div>跳跃次数: <span id="jumpCount">${jumpCount}</span></div>
+                    <div>空中跳跃: <span id="airJump">${airJumpCount}</span></div>
+                    <div>最高点: <span id="maxHeight">${maxHeight}</span>m</div>
+                `;
+            }
         }
 
         function draw() {
@@ -645,11 +725,7 @@
 
         function startGame() {
             if (animationId) cancelAnimationFrame(animationId);
-            initPlatforms();
-            resetPlayer();
-            jumpCount = 0;
-            airJumpCount = 0;
-            maxHeight = 0;
+            resetGame();
             gameLoop();
         }
 
@@ -705,6 +781,11 @@
         document.addEventListener('keydown', (e) => {
             if (currentMode === 'meme') return;
             
+            if (gameOver && (e.key === ' ' || e.key.toLowerCase() === 'r')) {
+                resetGame();
+                return;
+            }
+            
             switch(e.key.toLowerCase()) {
                 case 'a':
                 case 'arrowleft':
@@ -724,7 +805,11 @@
                     e.preventDefault();
                     break;
                 case 'r':
-                    resetPlayer();
+                    if (currentMode === 'endless-runner') {
+                        resetGame();
+                    } else {
+                        resetPlayer();
+                    }
                     break;
             }
         });
@@ -749,16 +834,20 @@
 
         canvas.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            const touch = e.touches[0];
-            const rect = canvas.getBoundingClientRect();
-            const x = touch.clientX - rect.left;
-            
-            if (x < canvas.width / 3) {
-                keys.left = true;
-            } else if (x > canvas.width * 2 / 3) {
-                keys.right = true;
-            } else {
+            if (currentMode === 'endless-runner') {
                 jump();
+            } else {
+                const touch = e.touches[0];
+                const rect = canvas.getBoundingClientRect();
+                const x = touch.clientX - rect.left;
+                
+                if (x < canvas.width / 3) {
+                    keys.left = true;
+                } else if (x > canvas.width * 2 / 3) {
+                    keys.right = true;
+                } else {
+                    jump();
+                }
             }
         });
 
