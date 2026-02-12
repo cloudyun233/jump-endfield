@@ -5,33 +5,33 @@
 纯粉丝恶搞/玩笑项目，灵感来自游戏里的跳跃机制（double jump、parkour、Ardelia 卡墙等）。
 
 - 没有 Mod、没有宏、没有游戏辅助功能  
-- 这里只有一些无聊的终端动画和 meme 实验  
+- 这里只有一个网页跳跃小游戏和 meme 实验  
 
-如果你是真玩家来找跳跃技巧的，抱歉让你白跑一趟😂  
+如果你是真玩家来找跳跃技巧的，抱歉让你白跑一趟  
 推荐去官方社区、B站或 Reddit 看攻略。
 
 **再次声明**：本仓库与 Hypergryph / 鹰角网络 / Endfield 无任何关联。
 
 ## 运行教程
 
-### 在线运行（最简）
-直接在终端中执行以下命令：
+### 在线运行
+直接访问 GitHub Pages：[点击游玩](https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/index.html)
 
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/jump_animation.sh)
-```
+## 操作说明
 
-### 本地运行
+| 按键 | 功能 |
+|------|------|
+| `A/D` 或 `←/→` | 左右移动 |
+| `空格/W` 或 `↑` | 跳跃（可双跳） |
+| `R` | 重置位置 |
 
-```bash
-# 下载脚本
-curl -fsSL https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/jump_animation.sh -o jump_animation.sh
+触屏设备：左侧点击向左，右侧点击向右，中间点击跳跃
 
-# 赋予执行权限
-chmod +x jump_animation.sh
+## 游戏模式
 
-# 执行脚本
-bash jump_animation.sh
-```
+- **双跳演示** - 体验二段跳机制
+- **跑酷模式** - 多平台跳跃挑战
+- **卡墙技巧** - 模拟 Ardelia 卡墙
+- **Meme实验** - 有趣的梗图展示
 
-玩得开心～ 🪂
+玩得开心~ 

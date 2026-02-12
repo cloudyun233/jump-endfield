@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>明日方舟：终末地 - 跳跃机制模拟器</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #fff;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            padding: 30px 0;
+            position: relative;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf, #e040fb);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 0 30px rgba(0, 212, 255, 0.5);
+            margin-bottom: 10px;
+        }
+
+        .header .subtitle {
+            color: #ffd700;
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+
+        .header .disclaimer {
+            color: #ff6b6b;
+            font-size: 0.9em;
+            padding: 10px 20px;
+            background: rgba(255, 107, 107, 0.1);
+            border-radius: 20px;
+            display: inline-block;
+        }
+
+        .menu {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin: 30px 0;
+        }
+
+        .menu-btn {
+            padding: 15px 30px;
+            font-size: 1.1em;
+            border: 2px solid #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+            color: #00d4ff;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .menu-btn:hover {
+            background: rgba(0, 212, 255, 0.3);
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.3);
+        }
+
+        .menu-btn.active {
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            color: #fff;
+            border-color: transparent;
+        }
+
+        .game-area {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 20px;
+            padding: 20px;
+            margin: 20px 0;
+            min-height: 500px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .canvas-container {
+            width: 100%;
+            height: 450px;
+            position: relative;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            border-radius: 10px;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .control-hint {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 10px 20px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .key {
+            background: linear-gradient(145deg, #3a3a5a, #2a2a4a);
+            padding: 8px 15px;
+            border-radius: 8px;
+            font-weight: bold;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .stats {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 0.9em;
+        }
+
+        .stats div {
+            margin: 5px 0;
+        }
+
+        .stats span {
+            color: #00d4ff;
+            font-weight: bold;
+        }
+
+        .meme-container {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            padding: 20px;
+        }
+
+        .meme-card {
+            background: linear-gradient(145deg, #2a2a4a, #1a1a3a);
+            padding: 30px;
+            border-radius: 20px;
+            text-align: center;
+            max-width: 500px;
+            margin: 10px;
+            opacity: 0;
+            transform: translateY(20px);
+            animation: fadeInUp 0.5s forwards;
+        }
+
+        .meme-card .question {
+            color: #ffd700;
+            font-size: 1.2em;
+            margin-bottom: 15px;
+        }
+
+        .meme-card .answer {
+            color: #00ff88;
+            font-size: 1.4em;
+            font-weight: bold;
+        }
+
+        @keyframes fadeInUp {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .particle {
+            position: absolute;
+            pointer-events: none;
+            border-radius: 50%;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0) rotate(0deg); opacity: 0.8; }
+            50% { transform: translateY(-20px) rotate(180deg); opacity: 0.4; }
+        }
+
+        .footer {
+            text-align: center;
+            padding: 30px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .footer a {
+            color: #00d4ff;
+            text-decoration: none;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .jump-indicator {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 10px;
+        }
+
+        .jump-count {
+            font-size: 1.5em;
+            color: #e040fb;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+            .menu-btn {
+                padding: 12px 20px;
+                font-size: 0.9em;
+            }
+            .game-area {
+                min-height: 400px;
+            }
+            .canvas-container {
+                height: 350px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>明日方舟：终末地</h1>
+            <p class="subtitle">跳跃机制模拟器</p>
+            <p class="disclaimer">这不是官方工具！纯粉丝恶搞项目</p>
+        </header>
+
+        <nav class="menu">
+            <button class="menu-btn active" data-mode="double-jump">双跳演示</button>
+            <button class="menu-btn" data-mode="parkour">跑酷模式</button>
+            <button class="menu-btn" data-mode="wall-cling">卡墙技巧</button>
+            <button class="menu-btn" data-mode="meme">Meme实验</button>
+        </nav>
+
+        <div class="game-area">
+            <div class="canvas-container">
+                <canvas id="gameCanvas"></canvas>
+            </div>
+            <div class="stats" id="stats">
+                <div>跳跃次数: <span id="jumpCount">0</span></div>
+                <div>空中跳跃: <span id="airJump">0</span></div>
+                <div>最高点: <span id="maxHeight">0</span>m</div>
+            </div>
+            <div class="jump-indicator">
+                <span class="jump-count" id="jumpIndicator">双跳就绪!</span>
+            </div>
+            <div class="meme-container" id="memeContainer"></div>
+        </div>
+
+        <div class="controls">
+            <div class="control-hint">
+                <span class="key">A/D</span>
+                <span>左右移动</span>
+            </div>
+            <div class="control-hint">
+                <span class="key">空格/W</span>
+                <span>跳跃 (可双跳)</span>
+            </div>
+            <div class="control-hint">
+                <span class="key">R</span>
+                <span>重置位置</span>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <p>玩得开心~</p>
+            <p style="margin-top: 10px; font-size: 0.8em;">
+                本仓库与 Hypergryph / 鹰角网络 / Endfield 无任何关联
+            </p>
+        </footer>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const stats = document.getElementById('stats');
+        const memeContainer = document.getElementById('memeContainer');
+        const jumpIndicator = document.getElementById('jumpIndicator');
+
+        let currentMode = 'double-jump';
+        let animationId = null;
+
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        const player = {
+            x: 100,
+            y: 300,
+            width: 40,
+            height: 60,
+            vx: 0,
+            vy: 0,
+            onGround: false,
+            jumpsLeft: 2,
+            maxJumps: 2,
+            color: '#00d4ff',
+            trail: [],
+            wallClinging: false,
+            wallSide: 0
+        };
+
+        const platforms = [];
+        const particles = [];
+        const gravity = 0.6;
+        const jumpForce = -14;
+        const moveSpeed = 5;
+        const friction = 0.85;
+
+        let jumpCount = 0;
+        let airJumpCount = 0;
+        let maxHeight = 0;
+        let baseY = 300;
+
+        const keys = {
+            left: false,
+            right: false,
+            jump: false
+        };
+
+        let jumpPressed = false;
+
+        function initPlatforms() {
+            platforms.length = 0;
+            const groundY = canvas.height - 50;
+            
+            platforms.push({ x: 0, y: groundY, width: canvas.width, height: 50, color: '#2a4a6a' });
+            
+            if (currentMode === 'parkour') {
+                platforms.push({ x: 200, y: groundY - 100, width: 150, height: 20, color: '#4a2a6a' });
+                platforms.push({ x: 450, y: groundY - 180, width: 120, height: 20, color: '#6a2a4a' });
+                platforms.push({ x: 650, y: groundY - 250, width: 100, height: 20, color: '#2a6a4a' });
+                platforms.push({ x: 850, y: groundY - 150, width: 130, height: 20, color: '#4a6a2a' });
+            }
+            
+            if (currentMode === 'wall-cling') {
+                platforms.push({ x: canvas.width - 100, y: 100, width: 30, height: canvas.height - 150, color: '#6a4a2a', isWall: true });
+                platforms.push({ x: 70, y: 100, width: 30, height: canvas.height - 150, color: '#6a4a2a', isWall: true });
+            }
+        }
+
+        function createParticle(x, y, color) {
+            for (let i = 0; i < 5; i++) {
+                particles.push({
+                    x: x,
+                    y: y,
+                    vx: (Math.random() - 0.5) * 8,
+                    vy: (Math.random() - 0.5) * 8,
+                    life: 1,
+                    color: color || '#00d4ff',
+                    size: Math.random() * 5 + 2
+                });
+            }
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.02;
+                p.vy += 0.1;
+                
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        function drawParticles() {
+            particles.forEach(p => {
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function drawPlayer() {
+            player.trail.push({ x: player.x + player.width / 2, y: player.y + player.height / 2 });
+            if (player.trail.length > 10) player.trail.shift();
+
+            if (currentMode === 'double-jump' || player.vy < 0) {
+                ctx.beginPath();
+                player.trail.forEach((pos, i) => {
+                    const alpha = i / player.trail.length * 0.3;
+                    ctx.fillStyle = `rgba(0, 212, 255, ${alpha})`;
+                    ctx.beginPath();
+                    ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            }
+
+            const gradient = ctx.createLinearGradient(player.x, player.y, player.x + player.width, player.y + player.height);
+            gradient.addColorStop(0, player.wallClinging ? '#ff6b6b' : '#00d4ff');
+            gradient.addColorStop(1, player.wallClinging ? '#e040fb' : '#7b2cbf');
+
+            ctx.fillStyle = gradient;
+            ctx.shadowColor = player.wallClinging ? '#ff6b6b' : '#00d4ff';
+            ctx.shadowBlur = 20;
+
+            ctx.beginPath();
+            ctx.roundRect(player.x, player.y, player.width, player.height, 10);
+            ctx.fill();
+
+            ctx.shadowBlur = 0;
+
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(player.x + 12, player.y + 20, 5, 0, Math.PI * 2);
+            ctx.arc(player.x + 28, player.y + 20, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.beginPath();
+            ctx.arc(player.x + 13, player.y + 21, 2, 0, Math.PI * 2);
+            ctx.arc(player.x + 29, player.y + 21, 2, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (player.jumpsLeft < player.maxJumps) {
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(player.jumpsLeft > 0 ? '×1' : '×0', player.x + player.width / 2, player.y - 10);
+            }
+        }
+
+        function drawPlatforms() {
+            platforms.forEach(p => {
+                const gradient = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.height);
+                gradient.addColorStop(0, p.color);
+                gradient.addColorStop(1, '#1a1a3a');
+                
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.roundRect(p.x, p.y, p.width, p.height, p.isWall ? 5 : 8);
+                ctx.fill();
+
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+        }
+
+        function drawBackground() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#0a0a1a');
+            gradient.addColorStop(0.5, '#1a1a3a');
+            gradient.addColorStop(1, '#2a2a4a');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            for (let i = 0; i < 50; i++) {
+                const x = (i * 73 + Date.now() * 0.01) % canvas.width;
+                const y = (i * 47) % canvas.height;
+                const size = (i % 3) + 1;
+                ctx.fillStyle = `rgba(255, 255, 255, ${0.1 + (i % 5) * 0.05})`;
+                ctx.beginPath();
+                ctx.arc(x, y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function checkCollision() {
+            player.onGround = false;
+            player.wallClinging = false;
+
+            platforms.forEach(p => {
+                if (player.x < p.x + p.width &&
+                    player.x + player.width > p.x &&
+                    player.y < p.y + p.height &&
+                    player.y + player.height > p.y) {
+                    
+                    if (p.isWall) {
+                        player.wallClinging = true;
+                        player.wallSide = player.x < p.x ? 1 : -1;
+                        player.vx = 0;
+                        player.vy *= 0.5;
+                        player.jumpsLeft = player.maxJumps;
+                    } else {
+                        const overlapLeft = (player.x + player.width) - p.x;
+                        const overlapRight = (p.x + p.width) - player.x;
+                        const overlapTop = (player.y + player.height) - p.y;
+                        const overlapBottom = (p.y + p.height) - player.y;
+
+                        const minOverlapX = Math.min(overlapLeft, overlapRight);
+                        const minOverlapY = Math.min(overlapTop, overlapBottom);
+
+                        if (minOverlapY < minOverlapX) {
+                            if (overlapTop < overlapBottom) {
+                                player.y = p.y - player.height;
+                                player.vy = 0;
+                                player.onGround = true;
+                                player.jumpsLeft = player.maxJumps;
+                            } else {
+                                player.y = p.y + p.height;
+                                player.vy = 0;
+                            }
+                        } else {
+                            if (overlapLeft < overlapRight) {
+                                player.x = p.x - player.width;
+                            } else {
+                                player.x = p.x + p.width;
+                            }
+                            player.vx = 0;
+                        }
+                    }
+                }
+            });
+        }
+
+        function update() {
+            if (keys.left) player.vx = -moveSpeed;
+            else if (keys.right) player.vx = moveSpeed;
+            else player.vx *= friction;
+
+            if (!player.wallClinging) {
+                player.vy += gravity;
+            } else {
+                player.vy += gravity * 0.3;
+                player.vy = Math.min(player.vy, 3);
+            }
+
+            player.x += player.vx;
+            player.y += player.vy;
+
+            if (player.x < 0) player.x = 0;
+            if (player.x + player.width > canvas.width) player.x = canvas.width - player.width;
+
+            checkCollision();
+
+            if (player.y > canvas.height) {
+                resetPlayer();
+            }
+
+            const currentHeight = Math.max(0, Math.floor((baseY - player.y) / 10));
+            if (currentHeight > maxHeight) {
+                maxHeight = currentHeight;
+            }
+
+            updateParticles();
+            updateStats();
+        }
+
+        function jump() {
+            if (player.jumpsLeft > 0) {
+                player.vy = jumpForce;
+                player.jumpsLeft--;
+                jumpCount++;
+                
+                if (!player.onGround) {
+                    airJumpCount++;
+                    createParticle(player.x + player.width / 2, player.y + player.height, '#e040fb');
+                    
+                    jumpIndicator.textContent = '双跳!';
+                    jumpIndicator.style.color = '#e040fb';
+                } else {
+                    createParticle(player.x + player.width / 2, player.y + player.height, '#00d4ff');
+                    jumpIndicator.textContent = '可再跳一次!';
+                    jumpIndicator.style.color = '#ffd700';
+                }
+                
+                if (player.jumpsLeft === 0) {
+                    jumpIndicator.textContent = '无跳跃次数!';
+                    jumpIndicator.style.color = '#ff6b6b';
+                }
+            }
+        }
+
+        function resetPlayer() {
+            player.x = 100;
+            player.y = canvas.height - 150;
+            player.vx = 0;
+            player.vy = 0;
+            player.jumpsLeft = player.maxJumps;
+            player.trail = [];
+            jumpIndicator.textContent = '双跳就绪!';
+            jumpIndicator.style.color = '#e040fb';
+        }
+
+        function updateStats() {
+            document.getElementById('jumpCount').textContent = jumpCount;
+            document.getElementById('airJump').textContent = airJumpCount;
+            document.getElementById('maxHeight').textContent = maxHeight;
+        }
+
+        function draw() {
+            drawBackground();
+            drawPlatforms();
+            drawPlayer();
+            drawParticles();
+        }
+
+        function gameLoop() {
+            if (currentMode === 'meme') return;
+            
+            update();
+            draw();
+            animationId = requestAnimationFrame(gameLoop);
+        }
+
+        function startGame() {
+            if (animationId) cancelAnimationFrame(animationId);
+            initPlatforms();
+            resetPlayer();
+            jumpCount = 0;
+            airJumpCount = 0;
+            maxHeight = 0;
+            gameLoop();
+        }
+
+        const memes = [
+            { q: '当你学会双跳后：', a: '我要跳到月球上去！' },
+            { q: '当你尝试Ardelia卡墙：', a: '卡住了...怎么办？' },
+            { q: '跑酷时的你：', a: '我感觉自己像个超级英雄！' },
+            { q: '当你从高处落下：', a: '啊啊啊啊啊啊啊！' },
+            { q: '官方看到这个工具：', a: '这是什么鬼？' },
+            { q: '双跳失败时：', a: '一定是延迟的问题...' },
+            { q: '成功卡墙后：', a: '我是游戏之神！' }
+        ];
+
+        function showMemes() {
+            if (animationId) cancelAnimationFrame(animationId);
+            stats.classList.add('hidden');
+            jumpIndicator.parentElement.classList.add('hidden');
+            memeContainer.style.display = 'flex';
+            memeContainer.innerHTML = '';
+
+            memes.forEach((meme, i) => {
+                setTimeout(() => {
+                    const card = document.createElement('div');
+                    card.className = 'meme-card';
+                    card.innerHTML = `
+                        <div class="question">${meme.q}</div>
+                        <div class="answer">${meme.a}</div>
+                    `;
+                    card.style.animationDelay = `${i * 0.1}s`;
+                    memeContainer.appendChild(card);
+                }, i * 800);
+            });
+        }
+
+        document.querySelectorAll('.menu-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.menu-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                currentMode = btn.dataset.mode;
+                memeContainer.style.display = 'none';
+                stats.classList.remove('hidden');
+                jumpIndicator.parentElement.classList.remove('hidden');
+                
+                if (currentMode === 'meme') {
+                    showMemes();
+                } else {
+                    startGame();
+                }
+            });
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (currentMode === 'meme') return;
+            
+            switch(e.key.toLowerCase()) {
+                case 'a':
+                case 'arrowleft':
+                    keys.left = true;
+                    break;
+                case 'd':
+                case 'arrowright':
+                    keys.right = true;
+                    break;
+                case 'w':
+                case 'arrowup':
+                case ' ':
+                    if (!jumpPressed) {
+                        jumpPressed = true;
+                        jump();
+                    }
+                    e.preventDefault();
+                    break;
+                case 'r':
+                    resetPlayer();
+                    break;
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            switch(e.key.toLowerCase()) {
+                case 'a':
+                case 'arrowleft':
+                    keys.left = false;
+                    break;
+                case 'd':
+                case 'arrowright':
+                    keys.right = false;
+                    break;
+                case 'w':
+                case 'arrowup':
+                case ' ':
+                    jumpPressed = false;
+                    break;
+            }
+        });
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            const x = touch.clientX - rect.left;
+            
+            if (x < canvas.width / 3) {
+                keys.left = true;
+            } else if (x > canvas.width * 2 / 3) {
+                keys.right = true;
+            } else {
+                jump();
+            }
+        });
+
+        canvas.addEventListener('touchend', (e) => {
+            keys.left = false;
+            keys.right = false;
+        });
+
+        startGame();
+    </script>
+</body>
+</html>
