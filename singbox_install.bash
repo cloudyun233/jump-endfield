@@ -6,6 +6,7 @@ SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_CONF_DIR="/usr/local/etc/sing-box"
 SINGBOX_CONF_PATH="$SINGBOX_CONF_DIR/config.json"
 NFT_CONF="/etc/nftables.conf"
+DEFAULT_DOMAIN="www.cho-kaguyahime.com"
 
 # 颜色
 info(){ echo -e "\e[1;34m[信息]\e[0m $*"; }
@@ -154,7 +155,6 @@ install_singbox(){
     info "Sing-box 已安装并配置服务。"
 }
 
-# 防火墙辅助函数
 # 防火墙辅助函数
 open_port(){
     local port="$1"
@@ -353,7 +353,7 @@ config_vless(){
     
     open_port "$port" "tcp"
 
-    local dest_domain="www.cho-kaguyahime.com"
+    local dest_domain="$DEFAULT_DOMAIN"
     local uuid=$(get_random_uuid)
     local short_id=$(openssl rand -hex 4)
     local keys=$("$SINGBOX_BIN" generate reality-keypair)
@@ -361,7 +361,7 @@ config_vless(){
     local public_key=$(echo "$keys" | grep "PublicKey" | cut -d: -f2 | tr -d ' \\"')
 
     local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg dest "$dest_domain" --arg pk "$private_key" --arg sid "$short_id" \
-        '{type: "vless", tag: "vless-reality", listen: "::", listen_port: ($port|tonumber), network: "tcp", users: [{uuid: $uuid, flow: "xtls-rprx-vision"}], tls: {enabled: true, server_name: $dest, reality: {enabled: true, handshake: {server: $dest, server_port: 443}, private_key: $pk, short_id: [$sid]}}}')
+        '{type: "vless", tag: "vless-reality", listen: "::", listen_port: ($port|tonumber), users: [{uuid: $uuid, flow: "xtls-rprx-vision"}], tls: {enabled: true, server_name: $dest, reality: {enabled: true, handshake: {server: $dest, server_port: 443}, private_key: $pk, short_id: [$sid]}}}')
 
     add_inbound "$inbound"
     info "VLESS Reality 已配置完成。"
@@ -389,23 +389,37 @@ config_hy2(){
     if [[ "$cert_mode" == "2" ]]; then
         read -rp "域名: " domain
         read -rp "邮箱: " email
-        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '{enabled: true, server_name: $domain, acme: {domain: [$domain], email: $email}}')
+        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '{enabled: true, alpn: ["h3"], server_name: $domain, acme: {domain: [$domain], email: $email}}')
     else
         local cert_path="$SINGBOX_CONF_DIR/hy2_self.crt"
         local key_path="$SINGBOX_CONF_DIR/hy2_self.key"
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=www.cho-kaguyahime.com" 2>/dev/null
-        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, certificate_path: $cert, key_path: $key}')
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" 2>/dev/null
+        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
     fi
+
+    # 询问是否启用 obfs
+    local obfs_config=""
+    read -rp "是否启用 obfs 混淆？[y/N]: " enable_obfs
+    if [[ "$enable_obfs" =~ ^[Yy]$ ]]; then
+        local obfs_password=$(get_random_password)
+        obfs_config=$(jq -n --arg pass "$obfs_password" '{type: "salamander", password: $pass}')
+    fi
+
+    # 配置 masquerade
+    local masquerade_config=$(jq -n --arg domain "$DEFAULT_DOMAIN" '{type: "proxy", proxy: {url: "https://" + $domain, rewrite_host: true}}')
 
     # 端口跳变逻辑已移除，移至主菜单单独配置
 
-    local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" \
-        '{type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: ($port|tonumber), network: "udp", users: [{password: $pass}], tls: $tls}')
+    local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" --argjson obfs "$obfs_config" --argjson masquerade "$masquerade_config" \
+        '{type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: ($port|tonumber), users: [{password: $pass}], tls: $tls, masquerade: $masquerade} + (if $obfs != {} then {obfs: $obfs} else {} end)')
 
     add_inbound "$inbound"
     info "Hysteria2 已配置完成。"
     echo "密码: $password"
     echo "端口: $port"
+    if [[ -n "$obfs_config" ]]; then
+        echo "Obfs 密码: $(echo "$obfs_config" | jq -r '.password')"
+    fi
 }
 
 config_tuic(){
@@ -426,19 +440,17 @@ config_tuic(){
     if [[ "$cert_mode" == "2" ]]; then
         read -rp "域名: " domain
         read -rp "邮箱: " email
-        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '{enabled: true, server_name: $domain, acme: {domain: [$domain], email: $email}}')
+        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '{enabled: true, alpn: ["h3"], server_name: $domain, acme: {domain: [$domain], email: $email}}')
     else
         local cert_path="$SINGBOX_CONF_DIR/tuic_self.crt"
         local key_path="$SINGBOX_CONF_DIR/tuic_self.key"
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=www.cho-kaguyahime.com" 2>/dev/null
-        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, certificate_path: $cert, key_path: $key}')
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" 2>/dev/null
+        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
     fi
     
-    # TUIC 端口跳变
-    # TUIC 端口跳变逻辑已移除，移至主菜单单独配置
 
     local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg pass "$password" --argjson tls "$tls_config" \
-        '{type: "tuic", tag: "tuic-in", listen: "::", listen_port: ($port|tonumber), network: "udp", users: [{uuid: $uuid, password: $pass}], congestion_control: "bbr", tls: $tls}')
+        '{type: "tuic", tag: "tuic-in", listen: "::", listen_port: ($port|tonumber), users: [{uuid: $uuid, password: $pass}], congestion_control: "bbr", tls: $tls}')
 
     add_inbound "$inbound"
     info "TUIC v5 已配置完成。"
@@ -448,12 +460,13 @@ config_tuic(){
 }
 
 clear_config(){ 
-    echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
+    # 只清除入栈配置，保留出站配置
+    jq '.inbounds = []' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
     if command -v nft >/dev/null; then
         nft flush table inet singbox_nat 2>/dev/null || true
     fi
     restart_singbox
-    info "配置已清除。"
+    info "入栈配置已清除。"
 }
 
 run_test_script(){ bash <(curl -Ls Check.Place); }
@@ -516,7 +529,7 @@ show_menu(){
     echo "3. 配置 Hysteria2"
     echo "4. 配置 TUIC v5"
     echo "5. 配置防火墙转发 (端口跳跃)(redhat系防火墙不建议使用)"
-    echo "6. 清除singbox配置"
+    echo "6. 清除入栈配置"
     echo "7. 卸载 Sing-box"
     echo "8. 服务器相关测试"
     echo "9. 安装 BBRv3(若想要更好的优化,可前往https://xanmod.org/)"
