@@ -102,6 +102,24 @@ EOF
 }
 
 restart_singbox(){
+    info "正在验证和格式化配置文件..."
+    
+    # 格式化配置文件
+    if "$SINGBOX_BIN" format -w -c "$SINGBOX_CONF_PATH" 2>/dev/null; then
+        info "配置文件已格式化。"
+    else
+        warn "配置文件格式化失败，可能存在语法错误。"
+    fi
+    
+    # 验证配置文件
+    if "$SINGBOX_BIN" check -c "$SINGBOX_CONF_PATH" 2>/dev/null; then
+        info "配置文件验证通过。"
+    else
+        err "配置文件验证失败，请检查配置！"
+        return 1
+    fi
+    
+    info "正在重启 Sing-box 服务..."
     if [[ "$RELEASE" == "alpine" ]]; then
         rc-service sing-box restart || rc-service sing-box start
     else
