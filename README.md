@@ -18,7 +18,20 @@
 直接在终端中执行以下命令：
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/heads/main/jump_animation.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/jump_animation.sh)
+```
+
+### 本地运行
+
+```bash
+# 下载脚本
+curl -fsSL https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/jump_animation.sh -o jump_animation.sh
+
+# 赋予执行权限
+chmod +x jump_animation.sh
+
+# 执行脚本
+bash jump_animation.sh
 ```
 
 玩得开心～ 🪂

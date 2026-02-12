@@ -36,7 +36,7 @@
 
 ```bash
 # 下载脚本
-curl -fsSL https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/heads/main/official.bash -o official.bash
+curl -fsSL https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/official.bash -o official.bash
 
 # 赋予执行权限
 chmod +x official.bash
@@ -48,7 +48,7 @@ bash official.bash
 #### 方法2：进程替换
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/heads/main/official.bash)
+bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/official.bash)
 ```
 
 ### 4. 安装Caddy反向代理（可选，但是你必须有指向服务器IP的域名。可能同时部署vless和hysteria2比部署caddy伪装更好）
@@ -57,7 +57,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/hea
 
 ```bash
 # 下载脚本
-curl -fsSL https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/heads/main/candy.sh -o candy.sh
+curl -fsSL https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/candy.sh -o candy.sh
 
 # 赋予执行权限
 chmod +x candy.sh
@@ -69,7 +69,7 @@ bash candy.sh
 #### 方法2：进程替换
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/hy2-vless/refs/heads/main/candy.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/candy.sh)
 ```
 
 ## 配置信息
