@@ -48,8 +48,10 @@ install_dependencies(){
 # 辅助函数：服务管理
 create_service_files(){
     if [[ "$RELEASE" == "alpine" ]]; then
-        # OpenRC
-        cat > "/etc/init.d/sing-box" <<EOF
+        local service_file="/etc/init.d/sing-box"
+        if [[ ! -f "$service_file" ]]; then
+            info "正在创建 OpenRC 服务文件..."
+            cat > "$service_file" <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="Sing-box Service"
@@ -63,11 +65,17 @@ depend() {
     after firewall
 }
 EOF
-        chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default
+            chmod +x "$service_file"
+            rc-update add sing-box default
+            info "OpenRC 服务文件已创建并启用。"
+        else
+            info "OpenRC 服务文件已存在，跳过创建。"
+        fi
     else
-        # Systemd
-        cat > "/etc/systemd/system/sing-box.service" <<EOF
+        local service_file="/etc/systemd/system/sing-box.service"
+        if [[ ! -f "$service_file" ]]; then
+            info "正在创建 Systemd 服务文件..."
+            cat > "$service_file" <<EOF
 [Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -84,8 +92,12 @@ LimitNOFILE=infinity
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable sing-box
+            systemctl daemon-reload
+            systemctl enable sing-box
+            info "Systemd 服务文件已创建并启用。"
+        else
+            info "Systemd 服务文件已存在，跳过创建。"
+        fi
     fi
 }
 
@@ -331,7 +343,34 @@ get_random_uuid(){ uuidgen || cat /proc/sys/kernel/random/uuid; }
 get_random_password(){ openssl rand -base64 16; }
 get_random_port(){ shuf -i 10000-65000 -n 1; }
 
-# 4. 辅助函数：更新配置 (JQ)
+# 辅助函数：清理证书文件
+cleanup_cert_files(){
+    local protocol="$1"
+    local cert_path=""
+    local key_path=""
+    
+    case "$protocol" in
+        "hysteria2")
+            cert_path="$SINGBOX_CONF_DIR/hy2_self.crt"
+            key_path="$SINGBOX_CONF_DIR/hy2_self.key"
+            ;;
+        "tuic")
+            cert_path="$SINGBOX_CONF_DIR/tuic_self.crt"
+            key_path="$SINGBOX_CONF_DIR/tuic_self.key"
+            ;;
+        *)
+            return
+            ;;
+    esac
+    
+    if [[ -f "$cert_path" ]] || [[ -f "$key_path" ]]; then
+        info "检测到已存在的 $protocol 证书文件，正在清理..."
+        rm -f "$cert_path" "$key_path"
+        info "旧证书文件已清理。"
+    fi
+}
+
+# 辅助函数：更新配置 (JQ)
 add_inbound(){
     local new_inbound="$1"
     
@@ -393,6 +432,9 @@ config_hy2(){
     else
         local cert_path="$SINGBOX_CONF_DIR/hy2_self.crt"
         local key_path="$SINGBOX_CONF_DIR/hy2_self.key"
+        
+        cleanup_cert_files "hysteria2"
+        
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" 2>/dev/null
         tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
     fi
@@ -444,6 +486,9 @@ config_tuic(){
     else
         local cert_path="$SINGBOX_CONF_DIR/tuic_self.crt"
         local key_path="$SINGBOX_CONF_DIR/tuic_self.key"
+        
+        cleanup_cert_files "tuic"
+        
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" 2>/dev/null
         tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
     fi
@@ -460,6 +505,28 @@ config_tuic(){
 }
 
 clear_config(){ 
+    info "正在清除入栈配置..."
+    
+    # 清除证书文件
+    local cert_files=(
+        "$SINGBOX_CONF_DIR/hy2_self.crt"
+        "$SINGBOX_CONF_DIR/hy2_self.key"
+        "$SINGBOX_CONF_DIR/tuic_self.crt"
+        "$SINGBOX_CONF_DIR/tuic_self.key"
+    )
+    
+    local cert_found=false
+    for cert_file in "${cert_files[@]}"; do
+        if [[ -f "$cert_file" ]]; then
+            rm -f "$cert_file"
+            cert_found=true
+        fi
+    done
+    
+    if [[ "$cert_found" == true ]]; then
+        info "证书文件已清理。"
+    fi
+    
     # 只清除入栈配置，保留出站配置
     jq '.inbounds = []' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
     if command -v nft >/dev/null; then
