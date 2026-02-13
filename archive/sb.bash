@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# set -euo pipefail
 
 # 全局变量
 SINGBOX_BIN="/usr/local/bin/sing-box"
@@ -33,13 +33,13 @@ check_sys(){
 install_dependencies(){
     info "正在安装依赖..."
     if [[ "$PM" == "apt" ]]; then
-        apt update && apt install -y curl wget jq nftables openssl tar cron
+        apt update && apt install -y curl wget jq nftables openssl tar cron || { err "依赖安装失败"; return 1; }
     elif [[ "$PM" == "apk" ]]; then
-        apk add curl wget jq nftables openssl tar cronie
+        apk add curl wget jq nftables openssl tar cronie || { err "依赖安装失败"; return 1; }
         rc-update add crond
         rc-service crond start
     elif [[ "$PM" == "yum" ]]; then
-        yum install -y curl wget jq nftables openssl tar cronie
+        yum install -y curl wget jq nftables openssl tar cronie || { err "依赖安装失败"; return 1; }
         systemctl enable crond
         systemctl start crond
     fi
@@ -105,14 +105,14 @@ restart_singbox(){
     info "正在验证和格式化配置文件..."
     
     # 格式化配置文件
-    if "$SINGBOX_BIN" format -w -c "$SINGBOX_CONF_PATH" 2>/dev/null; then
+    if "$SINGBOX_BIN" format -w -c "$SINGBOX_CONF_PATH"; then
         info "配置文件已格式化。"
     else
         warn "配置文件格式化失败，可能存在语法错误。"
     fi
     
     # 验证配置文件
-    if "$SINGBOX_BIN" check -c "$SINGBOX_CONF_PATH" 2>/dev/null; then
+    if "$SINGBOX_BIN" check -c "$SINGBOX_CONF_PATH"; then
         info "配置文件验证通过。"
     else
         err "配置文件验证失败，请检查配置！"
@@ -146,7 +146,8 @@ install_singbox(){
     case $ARCH in
         x86_64) S_ARCH="amd64" ;;
         aarch64) S_ARCH="arm64" ;;
-        *) err "不支持的架构: $ARCH"; exit 1 ;;
+        aarch64) S_ARCH="arm64" ;;
+        *) err "不支持的架构: $ARCH"; return 1 ;;
     esac
     
     URL="https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VER}/sing-box-${LATEST_VER}-linux-${S_ARCH}.tar.gz"
@@ -155,7 +156,7 @@ install_singbox(){
     # [优化] 增加下载成功检查
     if ! wget -O sing-box.tar.gz "$URL"; then
         err "下载 Sing-box 失败，请检查网络！"
-        exit 1
+        return 1
     fi
 
     tar -zxvf sing-box.tar.gz
@@ -169,7 +170,7 @@ install_singbox(){
         chmod +x "$SINGBOX_BIN"
     else
         err "解压后未找到二进制文件！"
-        exit 1
+        return 1
     fi
 
     # 清理现场
@@ -195,10 +196,11 @@ open_port(){
         # 检查基本输入链是否存在，不存在则创建
         nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
         if [[ -z "$nfthandel" ]]; then
-            nft add table inet singbox_filter 2>/dev/null || true
-            nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } 2>/dev/null || true
+        if [[ -z "$nfthandel" ]]; then
+            nft add table inet singbox_filter || true
+            nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } || true
         fi
-        nft add rule inet singbox_filter input "${proto}" dport "$port" accept 2>/dev/null || true
+        nft add rule inet singbox_filter input "${proto}" dport "$port" accept || true
         nft list ruleset > "$NFT_CONF"
     else
         warn "未找到支持的防火墙管理器 (nftables/firewalld)。请手动打开端口 $port。"
@@ -264,7 +266,7 @@ configure_dnat(){
         firewall-cmd --permanent --add-masquerade
         for hop in "${HOP_PORTS[@]}"; do
             # 移除旧的（如果完全匹配）- 尝试移除常见默认值
-            firewall-cmd --permanent --remove-forward-port=port=${hop}:proto=udp:toport=${dest_port} 2>/dev/null || true
+            firewall-cmd --permanent --remove-forward-port=port=${hop}:proto=udp:toport=${dest_port} || true
             
             # 添加新的
             firewall-cmd --permanent --add-forward-port=port=${hop}:proto=udp:toport=${dest_port}
@@ -278,14 +280,14 @@ configure_dnat(){
         
         # NFTables 容易清除：直接刷新 singbox_nat 表
         # 这会清除所有由本脚本管理的 NAT 规则
-        nft flush table inet singbox_nat 2>/dev/null || true
+        nft flush table inet singbox_nat || true
         
         # 重建表和链
-        nft add table inet singbox_nat 2>/dev/null || true
-        nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; } 2>/dev/null || true
+        nft add table inet singbox_nat || true
+        nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; } || true
         
         local chain_name="singbox_dnat"
-        nft add chain inet singbox_nat "$chain_name" 2>/dev/null || true
+        nft add chain inet singbox_nat "$chain_name" || true
         
         # 确保跳转
         if ! nft list chain inet singbox_nat prerouting | grep -q "jump $chain_name"; then
@@ -300,8 +302,8 @@ configure_dnat(){
         # 确保 filter 表存在
         nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
         if [[ -z "$nfthandel" ]]; then
-            nft add table inet singbox_filter 2>/dev/null || true
-            nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } 2>/dev/null || true
+            nft add table inet singbox_filter || true
+            nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } || true
         fi
         # 允许这些端口 (直接使用 hops 变量，因为它已经包含了逗号分隔列表，适合 nft 集合语法)
         nft add rule inet singbox_filter input udp dport { $hops } accept
@@ -402,7 +404,13 @@ add_inbound(){    local new_inbound="$1"
     jq --arg type "$type" 'del(.inbounds[] | select(.type == $type))' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
 
     # 添加入站
-    jq --argjson new "$new_inbound" '.inbounds += [$new]' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
+    # 添加入站
+    if jq --argjson new "$new_inbound" '.inbounds += [$new]' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp"; then
+        mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
+    else
+        err "添加配置失败 (jq error)"
+        return 1
+    fi
     restart_singbox
 }
 
@@ -483,6 +491,26 @@ config_hy2(){
     if [[ -n "$obfs_config" ]]; then
         echo "Obfs 密码: $(echo "$obfs_config" | jq -r '.password')"
     fi
+    
+    # 获取公网 IP
+    local public_ip=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
+    
+    echo ""
+    echo "========= Hysteria2 客户端配置参考 ========="
+    echo "Type: Hysteria2"
+    echo "Server: $public_ip"
+    echo "Port: $port"
+    echo "Auth: $password"
+    if [[ "$cert_mode" != "2" ]]; then
+        echo "TLS: { Enabled: true, Insecure: true (自签名证书必须开启) }"
+        warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
+    else
+        echo "TLS: { Enabled: true, ServerName: $domain }"
+    fi
+    if [[ -n "$obfs_config" ]]; then
+        echo "Obfs: { Type: salamander, Password: $(echo "$obfs_config" | jq -r '.password') }"
+    fi
+    echo "==========================================="
 }
 
 config_tuic(){
@@ -510,7 +538,7 @@ config_tuic(){
         
         cleanup_cert_files "tuic"
         
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" 2>/dev/null
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN"
         tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
     fi
     
@@ -550,9 +578,17 @@ clear_config(){
     
     # 只清除入栈配置，保留出站配置
     jq '.inbounds = []' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
+    
+    # 清理防火墙
     if command -v nft >/dev/null; then
-        nft flush table inet singbox_nat 2>/dev/null || true
+        nft flush table inet singbox_nat || true
+        nft delete table inet singbox_nat || true
+        nft delete table inet singbox_filter || true
+    elif command -v firewall-cmd >/dev/null; then
+        warn "Firewalld 用户请注意：脚本无法自动精确删除所有开放端口，请手动检查 'firewall-cmd --list-all'。"
+        firewall-cmd --reload
     fi
+    
     restart_singbox
     info "入栈配置已清除。"
 }
@@ -561,14 +597,22 @@ run_test_script(){ bash <(curl -Ls Check.Place); }
 run_bbr(){ bash <(curl -l -s https://raw.githubusercontent.com/byJoey/Actions-bbr-v3/refs/heads/main/install.sh); }
 uninstall_singbox(){ 
     rm -rf "$SINGBOX_BIN" "$SINGBOX_CONF_DIR"
+    
+    # 清理防火墙
+    if command -v nft >/dev/null; then
+        nft flush table inet singbox_nat || true
+        nft delete table inet singbox_nat || true
+        nft delete table inet singbox_filter || true
+    fi
+    
     if [[ "$RELEASE" == "alpine" ]]; then
-        rc-service sing-box stop
-        rc-update del sing-box
-        rm /etc/init.d/sing-box
+        rc-service sing-box stop || true
+        rc-update del sing-box || true
+        rm /etc/init.d/sing-box || true
     else
-        systemctl disable --now sing-box
-        rm /etc/systemd/system/sing-box.service
-        systemctl daemon-reload
+        systemctl disable --now sing-box || true
+        rm /etc/systemd/system/sing-box.service || true
+        systemctl daemon-reload || true
     fi
     info "已卸载。"
 }
