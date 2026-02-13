@@ -189,8 +189,8 @@ open_port(){
     local proto="$2" # tcp 或 udp
     
     if command -v firewall-cmd >/dev/null; then
-        firewall-cmd --permanent --add-port=${port}/${proto}
-        firewall-cmd --reload
+        firewall-cmd --permanent --add-port=${port}/${proto} || true
+        firewall-cmd --reload || true
     elif command -v nft >/dev/null; then
         # 检查基本输入链是否存在，不存在则创建
         nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
@@ -387,17 +387,22 @@ cleanup_cert_files(){
 }
 
 # 辅助函数：更新配置 (JQ)
-add_inbound(){
-    local new_inbound="$1"
+add_inbound(){    local new_inbound="$1"
+    
+    # 确保配置目录存在
+    mkdir -p "$SINGBOX_CONF_DIR"
+    
+    # 确保配置文件存在
+    if [[ ! -f "$SINGBOX_CONF_PATH" ]]; then
+        echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
+    fi
     
     # 移除旧的同类型 inbound（如果有）
-    local type=$(echo "$new_inbound" | jq -r '.type')
-    if [[ -f "$SINGBOX_CONF_PATH" ]]; then
-        jq --arg type "$type" 'del(.inbounds[] | select(.type == $type))' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
-    fi
+    local type=$(echo "$new_inbound" | jq -r '.type' || true)
+    jq --arg type "$type" 'del(.inbounds[] | select(.type == $type))' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
 
     # 添加入站
-    jq --argjson new "$new_inbound" '.inbounds += [$new]' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
+    jq --argjson new "$new_inbound" '.inbounds += [$new]' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
     restart_singbox
 }
 
@@ -451,7 +456,7 @@ config_hy2(){
         
         cleanup_cert_files "hysteria2"
         
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" 2>/dev/null
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" || true
         tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
     fi
 
