@@ -177,9 +177,7 @@ install_singbox(){
 
     # 配置处理
     mkdir -p "$SINGBOX_CONF_DIR"
-    if [[ ! -f "$SINGBOX_CONF_PATH" ]]; then
-        echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
-    fi
+    echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
     
     create_service_files
     info "Sing-box 已安装并配置服务。"
@@ -214,7 +212,7 @@ get_preferred_port(){
     [[ "$protocol" == "hysteria2" ]] && other_protocol="tuic" || other_protocol="hysteria2"
 
     # 检查当前配置
-    local current_port_443_proto=$(jq -r '.inbounds[] | select(.listen_port==443) | select(.type != "vless") | .type' "$SINGBOX_CONF_PATH" 2>/dev/null)
+    local current_port_443_proto=$(jq -r '.inbounds[] | select(.listen_port==443) | select(.type != "vless") | .type' "$SINGBOX_CONF_PATH" 2>/dev/null || true)
     
     if [[ -z "$current_port_443_proto" ]]; then
         # 443 未被使用，直接占用
