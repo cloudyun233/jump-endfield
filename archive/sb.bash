@@ -199,7 +199,11 @@ open_port(){
             nft add table inet singbox_filter || true
             nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } || true
         fi
-        nft add rule inet singbox_filter input "${proto}" dport "$port" accept || true
+        
+        # 检查规则是否已存在
+        if ! nft list table inet singbox_filter 2>/dev/null | grep -q "${proto} dport ${port} accept"; then
+            nft add rule inet singbox_filter input "${proto}" dport "$port" accept || true
+        fi
         nft list ruleset > "$NFT_CONF"
     else
         warn "未找到支持的防火墙管理器 (nftables/firewalld)。请手动打开端口 $port。"
