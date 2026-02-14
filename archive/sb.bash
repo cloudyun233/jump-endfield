@@ -512,20 +512,9 @@ config_hy2(){
         ')
     fi
 
-    # 配置 masquerade
-    local masquerade_config=$(jq -n --arg domain "$DEFAULT_DOMAIN" '
-        {
-            type: "proxy",
-            proxy: {
-                url: "https://\($domain)",
-                rewrite_host: true
-            }
-        }
-    ')
-
     # 端口跳变逻辑已移除，移至主菜单单独配置
 
-    local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" --argjson obfs "$obfs_config" --argjson masquerade "$masquerade_config" '
+    local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" --argjson obfs "$obfs_config" --arg domain "$DEFAULT_DOMAIN" '
         {
             type: "hysteria2",
             tag: "hysteria2-in",
@@ -537,7 +526,7 @@ config_hy2(){
                 }
             ],
             tls: $tls,
-            masquerade: $masquerade
+            masquerade: "https://\($domain)"
         } + (if $obfs != {} then {obfs: $obfs} else {} end)
     ')
 
