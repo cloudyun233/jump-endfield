@@ -528,6 +528,7 @@ config_hy2(){
             ],
             tls: $tls,
             masquerade: {
+                type: "proxy",
                 url: "https://\($domain)",
                 rewrite_host: true
             }
