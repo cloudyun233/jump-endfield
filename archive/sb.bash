@@ -210,7 +210,11 @@ open_port(){
 get_preferred_port(){
     local protocol="$1" # "hysteria2" or "tuic"
     local other_protocol=""
-    [[ "$protocol" == "hysteria2" ]] && other_protocol="tuic" || other_protocol="hysteria2"
+    if [[ "$protocol" == "hysteria2" ]]; then
+        other_protocol="tuic"
+    else
+        other_protocol="hysteria2"
+    fi
 
     # 检查当前配置
     local current_port_443_proto=$(jq -r '.inbounds[] | select(.listen_port==443) | select(.type != "vless") | .type' "$SINGBOX_CONF_PATH" 2>/dev/null || true)
