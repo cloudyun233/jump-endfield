@@ -428,8 +428,33 @@ config_vless(){
     local private_key=$(echo "$keys" | grep "PrivateKey" | cut -d: -f2 | tr -d ' \\"')
     local public_key=$(echo "$keys" | grep "PublicKey" | cut -d: -f2 | tr -d ' \\"')
 
-    local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg dest "$dest_domain" --arg pk "$private_key" --arg sid "$short_id" \
-        '{type: "vless", tag: "vless-reality", listen: "::", listen_port: ($port|tonumber), users: [{uuid: $uuid, flow: "xtls-rprx-vision"}], tls: {enabled: true, server_name: $dest, reality: {enabled: true, handshake: {server: $dest, server_port: 443}, private_key: $pk, short_id: [$sid]}}}')
+    local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg dest "$dest_domain" --arg pk "$private_key" --arg sid "$short_id" '
+        {
+            type: "vless",
+            tag: "vless-reality",
+            listen: "::",
+            listen_port: ($port|tonumber),
+            users: [
+                {
+                    uuid: $uuid,
+                    flow: "xtls-rprx-vision"
+                }
+            ],
+            tls: {
+                enabled: true,
+                server_name: $dest,
+                reality: {
+                    enabled: true,
+                    handshake: {
+                        server: $dest,
+                        server_port: 443
+                    },
+                    private_key: $pk,
+                    short_id: [$sid]
+                }
+            }
+        }
+    ')
 
     add_inbound "$inbound"
     info "VLESS Reality 已配置完成。"
@@ -457,7 +482,17 @@ config_hy2(){
     if [[ "$cert_mode" == "2" ]]; then
         read -rp "域名: " domain
         read -rp "邮箱: " email
-        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '{enabled: true, alpn: ["h3"], server_name: $domain, acme: {domain: [$domain], email: $email}}')
+        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '
+            {
+                enabled: true,
+                alpn: ["h3"],
+                server_name: $domain,
+                acme: {
+                    domain: [$domain],
+                    email: $email
+                }
+            }
+        ')
     else
         local cert_path="$SINGBOX_CONF_DIR/hy2_self.crt"
         local key_path="$SINGBOX_CONF_DIR/hy2_self.key"
@@ -465,7 +500,14 @@ config_hy2(){
         cleanup_cert_files "hysteria2"
         
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" || true
-        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
+        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '
+            {
+                enabled: true,
+                alpn: ["h3"],
+                certificate_path: $cert,
+                key_path: $key
+            }
+        ')
     fi
 
     # 询问是否启用 obfs
@@ -473,16 +515,42 @@ config_hy2(){
     read -rp "是否启用 obfs 混淆？[y/N]: " enable_obfs
     if [[ "$enable_obfs" =~ ^[Yy]$ ]]; then
         local obfs_password=$(get_random_password)
-        obfs_config=$(jq -n --arg pass "$obfs_password" '{type: "salamander", password: $pass}')
+        obfs_config=$(jq -n --arg pass "$obfs_password" '
+            {
+                type: "salamander",
+                password: $pass
+            }
+        ')
     fi
 
     # 配置 masquerade
-    local masquerade_config=$(jq -n --arg domain "$DEFAULT_DOMAIN" '{type: "proxy", proxy: {url: "https://" + $domain, rewrite_host: true}}')
+    local masquerade_config=$(jq -n --arg domain "$DEFAULT_DOMAIN" '
+        {
+            type: "proxy",
+            proxy: {
+                url: "https://" + $domain,
+                rewrite_host: true
+            }
+        }
+    ')
 
     # 端口跳变逻辑已移除，移至主菜单单独配置
 
-    local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" --argjson obfs "$obfs_config" --argjson masquerade "$masquerade_config" \
-        '{type: "hysteria2", tag: "hysteria2-in", listen: "::", listen_port: ($port|tonumber), users: [{password: $pass}], tls: $tls, masquerade: $masquerade} + (if $obfs != {} then {obfs: $obfs} else {} end)')
+    local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" --argjson obfs "$obfs_config" --argjson masquerade "$masquerade_config" '
+        {
+            type: "hysteria2",
+            tag: "hysteria2-in",
+            listen: "::",
+            listen_port: ($port|tonumber),
+            users: [
+                {
+                    password: $pass
+                }
+            ],
+            tls: $tls,
+            masquerade: $masquerade
+        } + (if $obfs != {} then {obfs: $obfs} else {} end)
+    ')
 
     add_inbound "$inbound"
     info "Hysteria2 已配置完成。"
@@ -492,17 +560,13 @@ config_hy2(){
         echo "Obfs 密码: $(echo "$obfs_config" | jq -r '.password')"
     fi
     
-    # 获取公网 IP
-    local public_ip=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
     
     echo ""
     echo "========= Hysteria2 客户端配置参考 ========="
     echo "Type: Hysteria2"
-    echo "Server: $public_ip"
     echo "Port: $port"
     echo "Auth: $password"
     if [[ "$cert_mode" != "2" ]]; then
-        echo "TLS: { Enabled: true, Insecure: true (自签名证书必须开启) }"
         warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
     else
         echo "TLS: { Enabled: true, ServerName: $domain }"
@@ -531,7 +595,17 @@ config_tuic(){
     if [[ "$cert_mode" == "2" ]]; then
         read -rp "域名: " domain
         read -rp "邮箱: " email
-        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '{enabled: true, alpn: ["h3"], server_name: $domain, acme: {domain: [$domain], email: $email}}')
+        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '
+            {
+                enabled: true,
+                alpn: ["h3"],
+                server_name: $domain,
+                acme: {
+                    domain: [$domain],
+                    email: $email
+                }
+            }
+        ')
     else
         local cert_path="$SINGBOX_CONF_DIR/tuic_self.crt"
         local key_path="$SINGBOX_CONF_DIR/tuic_self.key"
@@ -539,12 +613,35 @@ config_tuic(){
         cleanup_cert_files "tuic"
         
         openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN"
-        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '{enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key}')
+        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '
+            {
+                enabled: true,
+                alpn: ["h3"],
+                certificate_path: $cert,
+                key_path: $key
+            }
+        ')
     fi
     
 
-    local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg pass "$password" --argjson tls "$tls_config" \
-        '{type: "tuic", tag: "tuic-in", listen: "::", listen_port: ($port|tonumber), users: [{uuid: $uuid, password: $pass}], congestion_control: "bbr", tls: $tls}')
+    local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg pass "$password" --argjson tls "$tls_config" '
+        {
+            type: "tuic",
+            tag: "tuic-in",
+            listen: "::",
+            listen_port: ($port|tonumber),
+            users: [
+                {
+                    name: "cloudyun",
+                    uuid: $uuid,
+                    password: $pass
+                }
+            ],
+            congestion_control: "bbr",
+            zero_rtt_handshake: "true",
+            tls: $tls
+        }
+    ')
 
     add_inbound "$inbound"
     info "TUIC v5 已配置完成。"
