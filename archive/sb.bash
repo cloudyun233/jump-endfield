@@ -641,7 +641,7 @@ config_tuic(){
                 }
             ],
             congestion_control: "bbr",
-            zero_rtt_handshake: "true",
+            zero_rtt_handshake: true,
             tls: $tls
         }
     ')
