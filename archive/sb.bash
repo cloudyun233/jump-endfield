@@ -281,38 +281,24 @@ configure_dnat(){
     elif command -v nft >/dev/null; then
         info "正在配置 NFTables 转发..."
         
-        # NFTables 容易清除：直接刷新 singbox_nat 表
-        # 这会清除所有由本脚本管理的 NAT 规则
-        nft flush table inet singbox_nat || true
+        # 删除现有的 singbox_nat 表（如果存在）
+        nft delete table inet singbox_nat 2>/dev/null || true
         
-        # 重建表和链
-        nft add table inet singbox_nat || true
-        nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; } || true
+        # 添加新的 singbox_nat 表
+        nft add table inet singbox_nat
+        nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; policy accept \; }
+        nft add rule inet singbox_nat prerouting udp dport \{$hops\} dnat to :$dest_port
         
-        local chain_name="singbox_dnat"
-        nft add chain inet singbox_nat "$chain_name" || true
-        
-        # 确保跳转
-        if ! nft list chain inet singbox_nat prerouting | grep -q "jump $chain_name"; then
-            nft add rule inet singbox_nat prerouting jump "$chain_name"
-        fi
-        
-        # 添加规则
-        nft add rule inet singbox_nat "$chain_name" udp dport { $hops } dnat to :$dest_port
-        
-        # 开放端口
-        # 注意：这里我们开放所有跳跃端口，使用集合语法
-        # 确保 filter 表存在
-        nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
-        if [[ -z "$nfthandel" ]]; then
-            nft add table inet singbox_filter || true
-            nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } || true
-        fi
-        # 允许这些端口 (直接使用 hops 变量，因为它已经包含了逗号分隔列表，适合 nft 集合语法)
-        nft add rule inet singbox_filter input udp dport { $hops } accept
-        
+        # 保存完整的规则集到配置文件（保留其他表）
         nft list ruleset > "$NFT_CONF"
-        info "NFTables 规则已更新并保存。"
+        
+        # 重启 nftables 服务
+        if [[ "$RELEASE" == "alpine" ]]; then
+            rc-service nftables restart
+        else
+            systemctl restart nftables
+        fi
+        info "NFTables 规则已更新并生效。"
     fi
 }
 
@@ -337,7 +323,7 @@ config_port_hopping(){
     dest_port=${dest_port:-$default_dest}
     
     # 获取跳跃端口
-    local default_hops="443,2053,2083,2087,2096,8443"
+    local default_hops="443,2053,2083,2087,2096,8443,9443"
     echo "请输入接收端口（多个端口用逗号分隔，支持范围如 2000-3000，但 Firewalld 不支持范围）"
     read -rp "默认 [$default_hops]: " input_ports
     input_ports=${input_ports:-$default_hops}
