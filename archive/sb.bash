@@ -500,7 +500,7 @@ config_hy2(){
     fi
 
     # 询问是否启用 obfs
-    local obfs_config=""
+    local obfs_config='{}'
     read -rp "是否启用 obfs 混淆？[y/N]: " enable_obfs
     if [[ "$enable_obfs" =~ ^[Yy]$ ]]; then
         local obfs_password=$(get_random_password)
