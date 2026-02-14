@@ -196,7 +196,6 @@ open_port(){
         # 检查基本输入链是否存在，不存在则创建
         nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
         if [[ -z "$nfthandel" ]]; then
-        if [[ -z "$nfthandel" ]]; then
             nft add table inet singbox_filter || true
             nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } || true
         fi
