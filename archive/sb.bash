@@ -390,7 +390,7 @@ add_inbound(){    local new_inbound="$1"
     
     # 移除旧的同类型 inbound（如果有）
     local type=$(echo "$new_inbound" | jq -r '.type' || true)
-    jq --arg type "$type" 'del(.inbounds[] | select(.type == $type))' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
+    jq --arg type "$type" 'del(.inbounds[]? | select(.type == $type))' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
 
     # 添加入站
     # 添加入站
@@ -534,25 +534,12 @@ config_hy2(){
     info "Hysteria2 已配置完成。"
     echo "密码: $password"
     echo "端口: $port"
-    if [[ -n "$obfs_config" ]]; then
+    if [[ "$obfs_config" != "{}" ]]; then
         echo "Obfs 密码: $(echo "$obfs_config" | jq -r '.password')"
     fi
-    
-    
-    echo ""
-    echo "========= Hysteria2 客户端配置参考 ========="
-    echo "Type: Hysteria2"
-    echo "Port: $port"
-    echo "Auth: $password"
     if [[ "$cert_mode" != "2" ]]; then
         warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
-    else
-        echo "TLS: { Enabled: true, ServerName: $domain }"
     fi
-    if [[ -n "$obfs_config" ]]; then
-        echo "Obfs: { Type: salamander, Password: $(echo "$obfs_config" | jq -r '.password') }"
-    fi
-    echo "==========================================="
 }
 
 config_tuic(){
