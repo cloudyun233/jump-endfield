@@ -517,7 +517,7 @@ config_hy2(){
         {
             type: "proxy",
             proxy: {
-                url: "https://" + $domain,
+                url: "https://\($domain)",
                 rewrite_host: true
             }
         }
