@@ -469,6 +469,7 @@ config_hy2(){
     local tls_config=""
     
     if [[ "$cert_mode" == "2" ]]; then
+        stty erase '^?' 2>/dev/null
         read -rp "域名: " domain
         read -rp "邮箱: " email
         tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '
@@ -526,7 +527,10 @@ config_hy2(){
                 }
             ],
             tls: $tls,
-            masquerade: "https://\($domain)"
+            masquerade: {
+                url: "https://\($domain)",
+                rewrite_host: true
+            }
         } + (if $obfs != {} then {obfs: $obfs} else {} end)
     ')
 
