@@ -641,6 +641,7 @@ config_tuic(){
                 }
             ],
             congestion_control: "bbr",
+            auth_timeout: "3s",
             zero_rtt_handshake: true,
             tls: $tls
         }
