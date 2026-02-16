@@ -311,9 +311,9 @@ cleanup_cert_files(){
 
 # 辅助函数：生成 TLS 配置
 generate_tls_config(){
-    echo "证书模式:"
-    echo "1. 自签名"
-    echo "2. ACME (需要域名)"
+    echo "证书模式:" >&2
+    echo "1. 自签名" >&2
+    echo "2. ACME (需要域名)" >&2
     read -rp "选择 [1]: " TLS_CERT_MODE
     
     if [[ "$TLS_CERT_MODE" == "2" ]]; then
