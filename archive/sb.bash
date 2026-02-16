@@ -312,7 +312,7 @@ cleanup_cert_files(){
 # 辅助函数：生成 TLS 配置
 generate_tls_config(){
     echo "证书模式:" >&2
-    echo "1. 自签名" >&2
+    echo "1. 自签名(需要允许不安全)" >&2
     echo "2. ACME (需要域名)" >&2
     read -erp "选择 [1]: " TLS_CERT_MODE
     
@@ -422,6 +422,7 @@ config_vless(){
     echo "公钥: $public_key"
     echo "短 ID: $short_id"
     echo "端口: $port"
+    echo "域名: $dest_domain"
 }
 
 config_hy2(){
@@ -477,9 +478,6 @@ config_hy2(){
     if [[ "$obfs_config" != "{}" ]]; then
         echo "Obfs 密码: $(echo "$obfs_config" | jq -r '.password')"
     fi
-    if [[ "$TLS_CERT_MODE" != "2" ]]; then
-        warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
-    fi
 }
 
 config_tuic(){
@@ -519,9 +517,6 @@ config_tuic(){
     echo "UUID: $uuid"
     echo "密码: $password"
     echo "端口: $port"
-    if [[ "$TLS_CERT_MODE" != "2" ]]; then
-        warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
-    fi
 }
 
 clear_config(){ 
