@@ -146,7 +146,6 @@ install_singbox(){
     case $ARCH in
         x86_64) S_ARCH="amd64" ;;
         aarch64) S_ARCH="arm64" ;;
-        aarch64) S_ARCH="arm64" ;;
         *) err "不支持的架构: $ARCH"; return 1 ;;
     esac
     
@@ -365,7 +364,6 @@ add_inbound(){    local new_inbound="$1"
     local type=$(echo "$new_inbound" | jq -r '.type' || true)
     jq --arg type "$type" 'del(.inbounds[]? | select(.type == $type))' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp" && mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH" || true
 
-    # 添加入站
     # 添加入站
     if jq --argjson new "$new_inbound" '.inbounds += [$new]' "$SINGBOX_CONF_PATH" > "${SINGBOX_CONF_PATH}.tmp"; then
         mv "${SINGBOX_CONF_PATH}.tmp" "$SINGBOX_CONF_PATH"
