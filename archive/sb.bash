@@ -356,28 +356,53 @@ get_random_port(){ shuf -i 10000-65000 -n 1; }
 
 # 辅助函数：清理证书文件
 cleanup_cert_files(){
-    local protocol="$1"
-    local cert_path=""
-    local key_path=""
-    
-    case "$protocol" in
-        "hysteria2")
-            cert_path="$SINGBOX_CONF_DIR/hy2_self.crt"
-            key_path="$SINGBOX_CONF_DIR/hy2_self.key"
-            ;;
-        "tuic")
-            cert_path="$SINGBOX_CONF_DIR/tuic_self.crt"
-            key_path="$SINGBOX_CONF_DIR/tuic_self.key"
-            ;;
-        *)
-            return
-            ;;
-    esac
+    local cert_path="$SINGBOX_CONF_DIR/singbox.crt"
+    local key_path="$SINGBOX_CONF_DIR/singbox.key"
     
     if [[ -f "$cert_path" ]] || [[ -f "$key_path" ]]; then
-        info "检测到已存在的 $protocol 证书文件，正在清理..."
+        info "检测到已存在的证书文件，正在清理..."
         rm -f "$cert_path" "$key_path"
         info "旧证书文件已清理。"
+    fi
+}
+
+# 辅助函数：生成 TLS 配置
+generate_tls_config(){
+    echo "证书模式:"
+    echo "1. 自签名"
+    echo "2. ACME (需要域名)"
+    read -rp "选择 [1]: " TLS_CERT_MODE
+    
+    if [[ "$TLS_CERT_MODE" == "2" ]]; then
+        read -rp "域名: " domain
+        read -rp "邮箱: " email
+        jq -n --arg domain "$domain" --arg email "$email" --arg data_dir "$SINGBOX_CONF_DIR" '
+            {
+                enabled: true,
+                alpn: ["h3"],
+                server_name: $domain,
+                acme: {
+                    domain: [$domain],
+                    email: $email,
+                    data_directory: $data_dir
+                }
+            }
+        '
+    else
+        local cert_path="$SINGBOX_CONF_DIR/singbox.crt"
+        local key_path="$SINGBOX_CONF_DIR/singbox.key"
+        
+        cleanup_cert_files
+        
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" || true
+        jq -n --arg cert "$cert_path" --arg key "$key_path" '
+            {
+                enabled: true,
+                alpn: ["h3"],
+                certificate_path: $cert,
+                key_path: $key
+            }
+        '
     fi
 }
 
@@ -466,43 +491,7 @@ config_hy2(){
     
     local password=$(get_random_password)
 
-    echo "证书模式:"
-    echo "1. 自签名"
-    echo "2. ACME (需要域名)"
-    read -rp "选择 [1]: " cert_mode
-    local tls_config=""
-    
-    if [[ "$cert_mode" == "2" ]]; then
-        stty erase '^?' 2>/dev/null
-        read -rp "域名: " domain
-        read -rp "邮箱: " email
-        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '
-            {
-                enabled: true,
-                alpn: ["h3"],
-                server_name: $domain,
-                acme: {
-                    domain: [$domain],
-                    email: $email
-                }
-            }
-        ')
-    else
-        local cert_path="$SINGBOX_CONF_DIR/hy2_self.crt"
-        local key_path="$SINGBOX_CONF_DIR/hy2_self.key"
-        
-        cleanup_cert_files "hysteria2"
-        
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN" || true
-        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '
-            {
-                enabled: true,
-                alpn: ["h3"],
-                certificate_path: $cert,
-                key_path: $key
-            }
-        ')
-    fi
+    local tls_config=$(generate_tls_config)
 
     # 询问是否启用 obfs
     local obfs_config='{}'
@@ -546,7 +535,7 @@ config_hy2(){
     if [[ "$obfs_config" != "{}" ]]; then
         echo "Obfs 密码: $(echo "$obfs_config" | jq -r '.password')"
     fi
-    if [[ "$cert_mode" != "2" ]]; then
+    if [[ "$TLS_CERT_MODE" != "2" ]]; then
         warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
     fi
 }
@@ -561,43 +550,8 @@ config_tuic(){
     local uuid=$(get_random_uuid)
     local password=$(get_random_password)
 
-    echo "证书模式:"
-    echo "1. 自签名"
-    echo "2. ACME (需要域名)"
-    read -rp "选择 [1]: " cert_mode
-    local tls_config=""
-    if [[ "$cert_mode" == "2" ]]; then
-        read -rp "域名: " domain
-        read -rp "邮箱: " email
-        tls_config=$(jq -n --arg domain "$domain" --arg email "$email" '
-            {
-                enabled: true,
-                alpn: ["h3"],
-                server_name: $domain,
-                acme: {
-                    domain: [$domain],
-                    email: $email
-                }
-            }
-        ')
-    else
-        local cert_path="$SINGBOX_CONF_DIR/tuic_self.crt"
-        local key_path="$SINGBOX_CONF_DIR/tuic_self.key"
-        
-        cleanup_cert_files "tuic"
-        
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_path" -out "$cert_path" -days 3650 -subj "/CN=$DEFAULT_DOMAIN"
-        tls_config=$(jq -n --arg cert "$cert_path" --arg key "$key_path" '
-            {
-                enabled: true,
-                alpn: ["h3"],
-                certificate_path: $cert,
-                key_path: $key
-            }
-        ')
-    fi
+    local tls_config=$(generate_tls_config)
     
-
     local inbound=$(jq -n --arg port "$port" --arg uuid "$uuid" --arg pass "$password" --argjson tls "$tls_config" '
         {
             type: "tuic",
@@ -623,6 +577,9 @@ config_tuic(){
     echo "UUID: $uuid"
     echo "密码: $password"
     echo "端口: $port"
+    if [[ "$TLS_CERT_MODE" != "2" ]]; then
+        warn "注意：使用自签名证书时，客户端必须开启 '允许不安全连接' (Allow Insecure / Skip Verify)"
+    fi
 }
 
 clear_config(){ 
@@ -630,10 +587,8 @@ clear_config(){
     
     # 清除证书文件
     local cert_files=(
-        "$SINGBOX_CONF_DIR/hy2_self.crt"
-        "$SINGBOX_CONF_DIR/hy2_self.key"
-        "$SINGBOX_CONF_DIR/tuic_self.crt"
-        "$SINGBOX_CONF_DIR/tuic_self.key"
+        "$SINGBOX_CONF_DIR/singbox.crt"
+        "$SINGBOX_CONF_DIR/singbox.key"
     )
     
     local cert_found=false
