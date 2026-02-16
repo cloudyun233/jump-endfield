@@ -187,26 +187,21 @@ install_singbox(){
 # 防火墙辅助函数
 open_port(){
     local port="$1"
-    local proto="$2" # tcp 或 udp
+    local proto="$2"
     
-    if command -v firewall-cmd >/dev/null; then
-        firewall-cmd --permanent --add-port=${port}/${proto} || true
-        firewall-cmd --reload || true
-    elif command -v nft >/dev/null; then
-        # 检查基本输入链是否存在，不存在则创建
+    if command -v nft >/dev/null; then
         nfthandel=$(nft list table inet singbox_filter 2>/dev/null)
         if [[ -z "$nfthandel" ]]; then
             nft add table inet singbox_filter || true
             nft add chain inet singbox_filter input { type filter hook input priority 0 \; policy accept \; } || true
         fi
         
-        # 检查规则是否已存在
         if ! nft list table inet singbox_filter 2>/dev/null | grep -q "${proto} dport ${port} accept"; then
             nft add rule inet singbox_filter input "${proto}" dport "$port" accept || true
         fi
         nft list ruleset > "$NFT_CONF"
     else
-        warn "未找到支持的防火墙管理器 (nftables/firewalld)。请手动打开端口 $port。"
+        warn "未找到 nftables，请手动打开端口 $port。"
     fi
 }
 
@@ -235,7 +230,7 @@ get_preferred_port(){
         return
     fi
     
-    # 443 被别人（或 VLESS）占用了，回退到 8443
+    # 443 被别人占用了，回退到 8443
     echo "8443"
 }
 
@@ -243,99 +238,48 @@ configure_dnat(){
     local hops="$1"
     local dest_port="$2"
 
-    IFS=',' read -ra HOP_PORTS <<< "$hops"
-    
-    # 清除现有规则提示
     info "正在清除由于端口跳跃设置的旧防火墙转发规则..."
     
-    if command -v firewall-cmd >/dev/null; then
-        # Firewalld logic
-        # 尝试清除所有转发到 dest_port 的规则 (Best effort)
-        # 这是一个简化的清除，实际上 firewalld 很难精确清除未知的转发，除非我们遍历所有端口。
-        # 这里我们假设用户使用的是我们默认的端口或者之前的端口。
-        # 由于无法确切知道之前的 hops，这里我们发出警告，但执行重载。
-        # 为了真正清除，我们需要列出所有 forward-port 并删除。
-        
-        # 获取所有 forward-ports
-        fw_forwards=$(firewall-cmd --list-forward-ports)
-        if [[ -n "$fw_forwards" ]]; then
-            echo "$fw_forwards" | while read -r rule; do
-                # 格式: port=8443:proto=udp:toport=443:toaddr=
-                # 我们只关心 toport=$dest_port 的规则，或者是我们之前定义的跳跃端口。
-                # 简单起见，我们只能清除完全匹配的，或者提示用户。
-                # 鉴于脚本复杂性，这里我们只做添加。如果用户想要清除旧的，建议手动重置 firewalld。
-                warn "Firewalld 模式下，自动清除旧的自定义端口转发可能不完全。建议定期检查 firewall-cmd --list-forward-ports"
-            done
-        fi
-        
-        # 无论如何，添加新的
-        info "正在配置 Firewalld 转发..."
-        firewall-cmd --permanent --add-masquerade
-        for hop in "${HOP_PORTS[@]}"; do
-            # 移除旧的（如果完全匹配）- 尝试移除常见默认值
-            firewall-cmd --permanent --remove-forward-port=port=${hop}:proto=udp:toport=${dest_port} || true
-            
-            # 添加新的
-            firewall-cmd --permanent --add-forward-port=port=${hop}:proto=udp:toport=${dest_port}
-            firewall-cmd --permanent --add-port=${hop}/udp
-        done
-        firewall-cmd --reload
-        info "Firewalld 规则已应用。"
-
-    elif command -v nft >/dev/null; then
-        info "正在配置 NFTables 转发..."
-        
-        # 删除现有的 singbox_nat 表（如果存在）
-        nft delete table inet singbox_nat 2>/dev/null || true
-        
-        # 添加新的 singbox_nat 表
-        nft add table inet singbox_nat
-        nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; policy accept \; }
-        nft add rule inet singbox_nat prerouting udp dport \{$hops\} dnat to :$dest_port
-        
-        # 保存完整的规则集到配置文件（保留其他表）
-        nft list ruleset > "$NFT_CONF"
-        
-        # 重启 nftables 服务
-        if [[ "$RELEASE" == "alpine" ]]; then
-            rc-service nftables restart
-        else
-            systemctl restart nftables
-        fi
-        info "NFTables 规则已更新并生效。"
+    info "正在配置 NFTables 转发..."
+    
+    nft delete table inet singbox_nat 2>/dev/null || true
+    
+    nft add table inet singbox_nat
+    nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; policy accept \; }
+    nft add rule inet singbox_nat prerouting udp dport \{$hops\} dnat to :$dest_port
+    
+    nft list ruleset > "$NFT_CONF"
+    
+    if [[ "$RELEASE" == "alpine" ]]; then
+        rc-service nftables restart
+    else
+        systemctl restart nftables
     fi
+    info "NFTables 规则已更新并生效。"
 }
 
 config_port_hopping(){
-    # Firewalld 警告 + 二次确认
-    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-        warn "检测到您使用的是 Firewalld（常见于 CentOS/RHEL 等 RedHat 系系统）。"
-        warn "端口跳跃功能在 Firewalld 下有明显限制："
-        warn "  • 不支持端口范围（如 2000-3000）"
-        warn "  • 旧转发规则难以彻底清除，可能残留"
-        warn "强烈建议使用 nftables 系统（如 Debian/Ubuntu/Alpine）以获得完整功能。"
-        echo
-        read -rp "是否仍要继续配置？[y/N]: " force
-        [[ "$force" =~ ^[Yy]$ ]] || { info "已取消操作。"; return; }
+    if ! command -v nft >/dev/null 2>&1; then
+        err "端口跳跃功能需要 nftables 支持。"
+        err "当前系统未安装 nftables，请先安装后重试。"
+        err "Debian/Ubuntu: apt install nftables"
+        err "Alpine: apk add nftables"
+        return 1
     fi
 
     info "正在配置防火墙转发 (端口跳跃)..."
     
-    # 获取目的端口
     local default_dest="443"
     read -rp "请输入目标端口 (即 Hy2/TUIC 实际监听的端口) [默认: $default_dest]: " dest_port
     dest_port=${dest_port:-$default_dest}
     
-    # 获取跳跃端口
     local default_hops="443,2053,2083,2087,2096,8443,9443"
-    echo "请输入接收端口（多个端口用逗号分隔，支持范围如 2000-3000，但 Firewalld 不支持范围）"
+    echo "请输入接收端口（多个端口用逗号分隔，支持范围如 2000-3000）"
     read -rp "默认 [$default_hops]: " input_ports
     input_ports=${input_ports:-$default_hops}
     
-    # 简单去空格，防止 nftables 语法错误（用户输入 443, 2053 这种）
     input_ports="${input_ports// /}"
 
-    # 确认信息
     echo "--------------------------------"
     echo "目标端口: $dest_port"
     echo "跳转端口: $input_ports"
@@ -687,7 +631,7 @@ show_menu(){
     echo "2. 配置 VLESS Reality (Vision)"
     echo "3. 配置 Hysteria2"
     echo "4. 配置 TUIC v5"
-    echo "5. 配置防火墙转发 (端口跳跃)(redhat系防火墙不建议使用)"
+    echo "5. 配置防火墙转发(只支持nftable)"
     echo "6. 清除入栈配置"
     echo "7. 卸载 Sing-box"
     echo "8. 服务器相关测试"
