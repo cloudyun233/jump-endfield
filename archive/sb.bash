@@ -314,11 +314,11 @@ generate_tls_config(){
     echo "证书模式:" >&2
     echo "1. 自签名" >&2
     echo "2. ACME (需要域名)" >&2
-    read -rp "选择 [1]: " TLS_CERT_MODE
+    read -erp "选择 [1]: " TLS_CERT_MODE
     
     if [[ "$TLS_CERT_MODE" == "2" ]]; then
-        read -rp "域名: " domain
-        read -rp "邮箱: " email
+        read -erp "域名: " domain
+        read -erp "邮箱: " email
         jq -n --arg domain "$domain" --arg email "$email" --arg data_dir "$SINGBOX_CONF_DIR" '
             {
                 enabled: true,
