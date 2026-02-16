@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# set -euo pipefail
+#
+# Sing-box 一键配置脚本
+# 功能：安装和配置 Sing-box 代理服务，支持 VLESS Reality、Hysteria2、TUIC v5 协议
+# 依赖：curl, wget, jq, nftables, openssl, tar, cron
+# 支持：Debian/Ubuntu, CentOS, Alpine Linux
+#
+# 使用方法：直接运行脚本，通过菜单选择操作
+#
 
 # 全局变量
 SINGBOX_BIN="/usr/local/bin/sing-box"
@@ -8,12 +15,12 @@ SINGBOX_CONF_PATH="$SINGBOX_CONF_DIR/config.json"
 NFT_CONF="/etc/nftables.conf"
 DEFAULT_DOMAIN="www.cho-kaguyahime.com"
 
-# 颜色
+# 颜色输出函数
 info(){ echo -e "\e[1;34m[信息]\e[0m $*"; }
 warn(){ echo -e "\e[1;33m[警告]\e[0m $*"; }
 err(){ echo -e "\e[1;31m[错误]\e[0m $*"; }
 
-# 1. 系统检测和依赖检查
+# 检测操作系统类型，设置包管理器变量
 check_sys(){
     if [[ -f /etc/redhat-release ]]; then
         RELEASE="centos"
@@ -32,6 +39,7 @@ check_sys(){
 
 install_dependencies(){
     info "正在安装依赖..."
+    info "根据系统类型使用 $PM 安装必要依赖包"
     if [[ "$PM" == "apt" ]]; then
         apt update && apt install -y curl wget jq nftables openssl tar cron || { err "依赖安装失败"; return 1; }
     elif [[ "$PM" == "apk" ]]; then
@@ -45,7 +53,7 @@ install_dependencies(){
     fi
 }
 
-# 辅助函数：服务管理
+# 创建服务文件（支持 Systemd 和 OpenRC）
 create_service_files(){
     if [[ "$RELEASE" == "alpine" ]]; then
         local service_file="/etc/init.d/sing-box"
@@ -101,6 +109,7 @@ EOF
     fi
 }
 
+# 重启 Sing-box 服务（含配置验证和格式化）
 restart_singbox(){
     info "正在验证和格式化配置文件..."
     
@@ -128,14 +137,12 @@ restart_singbox(){
     info "Sing-box 已重启。"
 }
 
-# 2. Sing-box 安装
+# 下载并安装 Sing-box 二进制文件
 install_singbox(){
     info "正在安装 Sing-box (手动二进制方式)..."
     
-    # [新增] 预清理，确保通配符匹配准确
     rm -rf sing-box.tar.gz sing-box-*/
 
-    # 获取版本号
     LATEST_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     if [[ -z "$LATEST_VER" ]]; then
         warn "获取最新版本失败，使用硬编码的备用版本。"
@@ -152,7 +159,6 @@ install_singbox(){
     URL="https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VER}/sing-box-${LATEST_VER}-linux-${S_ARCH}.tar.gz"
     info "正在下载 Sing-box v$LATEST_VER ($S_ARCH)..."
     
-    # [优化] 增加下载成功检查
     if ! wget -O sing-box.tar.gz "$URL"; then
         err "下载 Sing-box 失败，请检查网络！"
         return 1
@@ -160,10 +166,8 @@ install_singbox(){
 
     tar -zxvf sing-box.tar.gz
     
-    # [优化] 确保目标二进制目录存在
     mkdir -p "$(dirname "$SINGBOX_BIN")"
     
-    # 查找并移动二进制文件
     if ls sing-box-*/sing-box >/dev/null 2>&1; then
         mv sing-box-*/sing-box "$SINGBOX_BIN"
         chmod +x "$SINGBOX_BIN"
@@ -172,10 +176,8 @@ install_singbox(){
         return 1
     fi
 
-    # 清理现场
     rm -rf sing-box.tar.gz sing-box-*/
 
-    # 配置处理
     mkdir -p "$SINGBOX_CONF_DIR"
     echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
     
@@ -183,7 +185,7 @@ install_singbox(){
     info "Sing-box 已安装并配置服务。"
 }
 
-# 防火墙辅助函数
+# 使用 nftables 开放指定端口
 open_port(){
     local port="$1"
     local proto="$2"
@@ -204,7 +206,7 @@ open_port(){
     fi
 }
 
-# 端口选择逻辑
+# 智能选择端口：优先使用 443，若被其他协议占用则回退到 8443
 get_preferred_port(){
     local protocol="$1" # "hysteria2" or "tuic"
     local other_protocol=""
@@ -233,6 +235,7 @@ get_preferred_port(){
     echo "8443"
 }
 
+# 配置 nftables DNAT 规则（用于端口跳跃）
 configure_dnat(){
     local hops="$1"
     local dest_port="$2"
@@ -257,6 +260,7 @@ configure_dnat(){
     info "NFTables 规则已更新并生效。"
 }
 
+# 交互式配置端口跳跃功能
 config_port_hopping(){
     if ! command -v nft >/dev/null 2>&1; then
         err "端口跳跃功能需要 nftables 支持。"
@@ -292,12 +296,12 @@ config_port_hopping(){
     configure_dnat "$input_ports" "$dest_port"
 }
 
-# 3. 辅助函数：生成随机凭证
+# 生成随机 UUID
 get_random_uuid(){ uuidgen || cat /proc/sys/kernel/random/uuid; }
+# 生成随机密码
 get_random_password(){ openssl rand -base64 16; }
-get_random_port(){ shuf -i 10000-65000 -n 1; }
 
-# 辅助函数：清理证书文件
+# 清理已存在的证书文件
 cleanup_cert_files(){
     local cert_path="$SINGBOX_CONF_DIR/singbox.crt"
     local key_path="$SINGBOX_CONF_DIR/singbox.key"
@@ -309,7 +313,7 @@ cleanup_cert_files(){
     fi
 }
 
-# 辅助函数：生成 TLS 配置
+# 生成 TLS 配置（支持自签名证书和 ACME）
 generate_tls_config(){
     echo "证书模式:" >&2
     echo "1. 自签名(需要允许不安全)" >&2
@@ -349,7 +353,7 @@ generate_tls_config(){
     fi
 }
 
-# 辅助函数：更新配置 (JQ)
+# 添加入站配置到 JSON 配置文件（使用 jq 处理）
 add_inbound(){    local new_inbound="$1"
     
     # 确保配置目录存在
@@ -374,7 +378,7 @@ add_inbound(){    local new_inbound="$1"
     restart_singbox
 }
 
-# 配置函数
+# 配置 VLESS Reality 协议
 config_vless(){
     info "正在配置 VLESS Reality..."
     local port=443
@@ -425,6 +429,7 @@ config_vless(){
     echo "域名: $dest_domain"
 }
 
+# 配置 Hysteria2 协议
 config_hy2(){
     info "正在配置 Hysteria2..."
     local port=$(get_preferred_port "hysteria2")
@@ -448,8 +453,6 @@ config_hy2(){
             }
         ')
     fi
-
-    # 端口跳变逻辑已移除，移至主菜单单独配置
 
     local inbound=$(jq -n --arg port "$port" --arg pass "$password" --argjson tls "$tls_config" --argjson obfs "$obfs_config" --arg domain "$DEFAULT_DOMAIN" '
         {
@@ -480,6 +483,7 @@ config_hy2(){
     fi
 }
 
+# 配置 TUIC v5 协议
 config_tuic(){
     info "正在配置 TUIC v5..."
     local port=$(get_preferred_port "tuic")
@@ -519,6 +523,7 @@ config_tuic(){
     echo "端口: $port"
 }
 
+# 清除所有入站配置
 clear_config(){ 
     info "正在清除入栈配置..."
     
@@ -557,8 +562,11 @@ clear_config(){
     info "入栈配置已清除。"
 }
 
+# 运行服务器测试脚本
 run_test_script(){ bash <(curl -Ls Check.Place); }
+# 安装 BBRv3 内核优化
 run_bbr(){ bash <(curl -l -s https://raw.githubusercontent.com/byJoey/Actions-bbr-v3/refs/heads/main/install.sh); }
+# 卸载 Sing-box 及相关配置 
 uninstall_singbox(){ 
     rm -rf "$SINGBOX_BIN" "$SINGBOX_CONF_DIR"
     
@@ -581,10 +589,10 @@ uninstall_singbox(){
     info "已卸载。"
 }
 
+# 配置定时重启任务（每天 20:00 UTC）
 configure_cron_reboot(){
     info "正在检查并配置系统时间为 UTC..."
     
-    # 检查当前时区
     current_timezone=$(timedatectl show --property=Timezone --value 2>/dev/null || date +%Z)
     
     if [[ "$current_timezone" != "UTC" ]]; then
@@ -593,7 +601,6 @@ configure_cron_reboot(){
             timedatectl set-timezone UTC
             info "时区已设置为 UTC"
         else
-            # 备用方案：手动设置
             if [[ -f /etc/localtime ]]; then
                 rm -f /etc/localtime
             fi
@@ -616,6 +623,7 @@ configure_cron_reboot(){
     info "定时任务已添加。"
 }
 
+# 显示交互式菜单
 show_menu(){
     echo "=================================="
     echo "        Sing-box 一键配置          "
