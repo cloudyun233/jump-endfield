@@ -253,8 +253,10 @@ configure_dnat(){
     nft list ruleset > "$NFT_CONF"
     
     if [[ "$RELEASE" == "alpine" ]]; then
+        rc-update add nftables default
         rc-service nftables restart
     else
+        systemctl enable nftables
         systemctl restart nftables
     fi
     info "NFTables 规则已更新并生效。"
