@@ -434,8 +434,10 @@ config_vless(){
 # 配置 Hysteria2 协议
 config_hy2(){
     info "正在配置 Hysteria2..."
-    local port=$(get_preferred_port "hysteria2")
-    info "自动选择端口: $port"
+    local default_port=$(get_preferred_port "hysteria2")
+    read -rp "请输入监听端口 [默认: $default_port]: " port
+    port=${port:-$default_port}
+    info "使用端口: $port"
     
     open_port "$port" "udp"
     
@@ -488,8 +490,10 @@ config_hy2(){
 # 配置 TUIC v5 协议
 config_tuic(){
     info "正在配置 TUIC v5..."
-    local port=$(get_preferred_port "tuic")
-    info "自动选择端口: $port"
+    local default_port=$(get_preferred_port "tuic")
+    read -rp "请输入监听端口 [默认: $default_port]: " port
+    port=${port:-$default_port}
+    info "使用端口: $port"
     
     open_port "$port" "udp"
     
