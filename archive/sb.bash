@@ -662,7 +662,7 @@ show_menu(){
     echo "=================================="
     echo "        Sing-box 一键配置          "
     echo "=================================="
-    echo "1. 安装 Sing-box"
+    echo "1. 安装/更新 Sing-box"
     echo "2. 配置 VLESS Reality (Vision)"
     echo "3. 配置 Hysteria2"
     echo "4. 配置 TUIC v5"
