@@ -1,5 +1,4 @@
 # VLESS+XTLS+REALITY 与 Hysteria2 一键安装脚本
-# 施工中，正在逐步迁移，原脚本可用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-blue.svg)](https://www.gnu.org/software/bash/)
@@ -17,56 +16,54 @@
 
 ## 简介
 
-本项目包含两个脚本，用于在Linux服务器上快速部署：
-1. **official.bash** - VLESS+XTLS+REALITY (Xray) 和/或 Hysteria2 协议的一键安装/卸载脚本
-2. **candy.sh** - Caddy 反向代理服务器部署脚本，用于伪装服务器
+本项目包含三个脚本，用于在Linux服务器上快速部署代理服务：
+1. **official.bash** - Xray (VLESS+XTLS+REALITY) 和 Hysteria2 一键安装/卸载脚本
+2. **candy.sh** - Caddy 反向代理服务器部署脚本
+3. **sb.bash** - Sing-box 一键配置脚本，支持 VLESS Reality、Hysteria2、TUIC v5 协议
 
 ## 系统要求
 
-- Linux操作系统 (支持apt/dnf/yum/apk包管理器的发行版)
-- root权限或sudo权限
+- Linux操作系统 (支持 apt/dnf/yum/apk 包管理器的发行版)
+- root 权限或 sudo 权限
 
 ## 快速开始
 
-### 1. 安装curl
+> **推荐：优先使用 Sing-box**，功能更丰富，支持 VLESS Reality、Hysteria2、TUIC v5 多种协议
 
-### 2. 运行主脚本
-
-#### 方法1：分步执行（推荐）
+### 1. Sing-box（推荐）
 
 ```bash
-# 下载脚本
-curl -fsSL https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/official.bash -o official.bash
-
-# 赋予执行权限
-chmod +x official.bash
-
-# 执行脚本
-bash official.bash
+bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/sb.bash)
 ```
 
-#### 方法2：进程替换
+**功能选项：**
+- 1) 安装/更新 Sing-box
+- 2) 配置 VLESS Reality
+- 3) 配置 Hysteria2
+- 4) 配置 TUIC v5
+- 5) 配置端口跳跃
+- 6) 清除入栈配置
+
+---
+
+### 2. official.bash（官方 Xray/Hysteria2）
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/official.bash)
 ```
 
-### 4. 安装Caddy反向代理（可选，但是你必须有指向服务器IP的域名。可能同时部署vless和hysteria2比部署caddy伪装更好）
+**功能选项：**
+- 1) 安装 VLESS + XTLS + REALITY (Xray)
+- 2) 安装 Hysteria2
+- 3) 删除 Xray
+- 4) 删除 Hysteria2
+- 5) IP 质量检测
 
-#### 方法1：分步执行（推荐）
+---
 
-```bash
-# 下载脚本
-curl -fsSL https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/candy.sh -o candy.sh
+### 3. Caddy 反向代理（可选）
 
-# 赋予执行权限
-chmod +x candy.sh
-
-# 执行脚本
-bash candy.sh
-```
-
-#### 方法2：进程替换
+需要已解析到服务器 IP 的域名。
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs/heads/main/archive/candy.sh)
@@ -74,12 +71,12 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs
 
 ## 配置信息
 
-### VLESS+XTLS+REALITY (Xray)
+### Xray (VLESS+XTLS+REALITY)
 
 - **配置文件**: `/usr/local/etc/xray/config.json`
 - **安装目录**: `/usr/local/share/xray/`
 - **默认端口**: 443 (TCP)
-
+- **回弹端口**: 8443
 
 ### Hysteria2
 
@@ -87,11 +84,17 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs
 - **安装目录**: `/etc/hysteria/`
 - **默认端口**: 443 (UDP)
 
+### Sing-box
 
-### Caddy反向代理
+- **配置文件**: `/usr/local/etc/sing-box/config.json`
+- **安装目录**: `/usr/local/etc/sing-box/`
+- **支持协议**: VLESS Reality, Hysteria2, TUIC v5
+
+### Caddy 反向代理
 
 - **配置文件**: `/etc/caddy/Caddyfile`
 
+---
 
 ## Clash Meta 客户端配置
 
@@ -125,7 +128,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs
 - name: 服务器名称
   type: hysteria2
   server: 服务器IP/域名
-  # 在非443端口，建议使用ip连接，并启用端口跳跃
   port: 端口（默认443）
   password: 脚本生成的密码
   skip-cert-verify: true
@@ -136,14 +138,29 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs
   # obfs-password: 混淆密码
 ```
 
+### TUIC v5
+
+```yaml
+- name: 服务器名称
+  type: tuic
+  server: 服务器IP/域名
+  port: 端口
+  uuid: 脚本生成的UUID
+  password: 脚本生成的密码
+  congestion_control: bbr
+  skip-cert-verify: true
+```
+
+---
+
 ## 特殊场景
 
 ### 校园网绕过
 
 在某些限制性网络环境中，可通过以下方式绕过限制：
 
-1. 安装Hysteria2服务（选择选项2）
-2. 配置防火墙端口转发（以nftables为例）：
+1. 安装 Hysteria2 服务
+2. 配置防火墙端口转发（以 nftables 为例）：
 
 ```bash
 # 将53端口(DNS) UDP流量转发到443端口
@@ -157,20 +174,24 @@ sudo nft add rule inet nat prerouting udp dport 68 dnat to :443
 ```
 
 3. 客户端使用53端口（或其他转发端口）连接
-4. 若服务器重启，需要重新配置端口转发规则。或者参考下面的nftables配置以持久化。
+4. 若服务器重启，需要重新配置端口转发规则。或者参考下面的 nftables 配置以持久化。
+
+---
+
 ## 维护
 
 ### 定时重启任务
 
-以下cron任务可用于每天UTC20:00自动重启服务器：
+以下 cron 任务可用于每天 UTC 20:00 自动重启服务器：
 
 ```
 crontab -e
 0 20 * * * /sbin/reboot
 ```
-### nftables端口转发
 
-要启用nftables服务并配置端口转发，请执行以下命令：
+### nftables 端口转发
+
+要启用 nftables 服务并配置端口转发，请执行以下命令：
 
 ```bash
 # 编辑nftables配置文件
@@ -181,7 +202,7 @@ table inet nat {
         type nat hook prerouting priority dstnat; policy accept;
 
         # 转发指定UDP端口到本机UDP 443端口（用于Hysteria2端口跳跃）
-        udp dport {2053, 2083, 2087, 2096, 8443} dnat to :443
+        udp dport {2053, 2083, 2087, 2096, 8443, 9443} dnat to :443
 
         # 大范围端口跳跃可用
         # udp dport 10240-20480 dnat to :443
@@ -199,13 +220,14 @@ sudo systemctl enable nftables
 
 ## 许可证与致谢
 
-- 本项目采用MIT许可证
+- 本项目采用 MIT 许可证
 - 致谢：
-  - [Xray-project](https://github.com/XTLS/Xray-core) - 提供Xray核心
-  - [Hysteria](https://github.com/apernet/hysteria) - 提供Hysteria2协议实现
+  - [Xray-project](https://github.com/XTLS/Xray-core) - 提供 Xray 核心
+  - [Hysteria](https://github.com/apernet/hysteria) - 提供 Hysteria2 协议实现
+  - [Sing-box](https://github.com/SagerNet/sing-box) - 提供多协议代理支持
   - [Caddy](https://github.com/caddyserver/caddy) - 提供反向代理功能
-  - [IPQuality](https://github.com/xykt/IPQuality) - 提供IP质量检测服务
+  - [IPQuality](https://github.com/xykt/IPQuality) - 提供 IP 质量检测服务
 
 ## 贡献
 
-欢迎提交Issue和Pull Request来帮助改进此项目。
+欢迎提交 Issue 和 Pull Request 来帮助改进此项目。
