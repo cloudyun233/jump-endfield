@@ -146,7 +146,29 @@ install_singbox(){
     LATEST_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     if [[ -z "$LATEST_VER" ]]; then
         warn "获取最新版本失败，使用硬编码的备用版本。"
-        LATEST_VER="1.12.21" 
+        LATEST_VER="1.13.2" 
+    fi
+
+    # 如果已安装，则按版本判断是否需要更新（保留现有配置）
+    local was_installed=0
+    if [[ -x "$SINGBOX_BIN" ]]; then
+        was_installed=1
+        local current_ver=""
+        current_ver=$("$SINGBOX_BIN" version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+        if [[ -n "$current_ver" && "$current_ver" == "$LATEST_VER" ]]; then
+            info "检测到 Sing-box 已是最新版 v${current_ver}，跳过更新。"
+            mkdir -p "$SINGBOX_CONF_DIR"
+            if [[ ! -f "$SINGBOX_CONF_PATH" ]]; then
+                echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
+            fi
+            create_service_files
+            return 0
+        fi
+        if [[ -n "$current_ver" ]]; then
+            info "检测到已安装 Sing-box v${current_ver}，将更新到 v${LATEST_VER}..."
+        else
+            info "检测到已安装 Sing-box，将更新到 v${LATEST_VER}..."
+        fi
     fi
     
     ARCH=$(uname -m)
@@ -179,9 +201,15 @@ install_singbox(){
     rm -rf sing-box.tar.gz sing-box-*/
 
     mkdir -p "$SINGBOX_CONF_DIR"
-    echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
+    if [[ ! -f "$SINGBOX_CONF_PATH" ]]; then
+        echo '{"log": {"level": "info", "timestamp": true}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}' > "$SINGBOX_CONF_PATH"
+    fi
     
     create_service_files
+    # 更新二进制后尝试重启使其生效（失败不影响安装/更新结果）
+    if [[ "$was_installed" -eq 1 ]]; then
+        restart_singbox || warn "重启 Sing-box 失败，请手动重启服务。"
+    fi
     info "Sing-box 已安装并配置服务。"
 }
 
