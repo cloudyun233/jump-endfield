@@ -138,7 +138,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs
   # obfs-password: 混淆密码
 ```
 
-### TUIC v5
+<!-- ### TUIC v5
 
 ```yaml
 - name: 服务器名称
@@ -149,7 +149,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/cloudyun233/jump-endfield/refs
   password: 脚本生成的密码
   congestion_control: bbr
   skip-cert-verify: true
-```
+``` -->
 
 ---
 
@@ -214,6 +214,7 @@ table inet nat {
 }
 # 启用nftables服务
 sudo systemctl enable nftables
+sudo systemctl restart nftables
 ```
 
 可用于绕过某些网络环境中的端口限制。
