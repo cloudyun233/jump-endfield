@@ -276,7 +276,18 @@ configure_dnat(){
     
     nft add table inet singbox_nat
     nft add chain inet singbox_nat prerouting { type nat hook prerouting priority dstnat \; policy accept \; }
-    nft add rule inet singbox_nat prerouting udp dport \{$hops\} dnat to :$dest_port
+    
+    # 解析端口列表，支持混合格式如：443,2053,2000-3000
+    IFS=',' read -ra port_items <<< "$hops"
+    for item in "${port_items[@]}"; do
+        if [[ "$item" == *"-"* ]]; then
+            # 范围格式：2000-3000
+            nft add rule inet singbox_nat prerouting udp dport $item dnat to :$dest_port
+        else
+            # 单个端口
+            nft add rule inet singbox_nat prerouting udp dport $item dnat to :$dest_port
+        fi
+    done
     
     nft list ruleset > "$NFT_CONF"
     
