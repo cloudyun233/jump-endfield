@@ -323,6 +323,8 @@ config_port_hopping(){
     input_ports=${input_ports:-$default_hops}
     
     input_ports="${input_ports// /}"
+    # 将中文逗号替换为英文逗号
+    input_ports="${input_ports//，/,}"
 
     echo "--------------------------------"
     echo "目标端口: $dest_port"
