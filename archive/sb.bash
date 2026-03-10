@@ -342,7 +342,7 @@ config_port_hopping(){
 # 生成随机 UUID
 get_random_uuid(){ uuidgen || cat /proc/sys/kernel/random/uuid; }
 # 生成随机密码
-get_random_password(){ openssl rand -base64 16; }
+get_random_password(){ openssl rand -base64 18; }
 
 # 清理已存在的证书文件
 cleanup_cert_files(){
