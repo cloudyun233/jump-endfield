@@ -311,6 +311,19 @@ config_port_hopping(){
         return 1
     fi
 
+    echo "=================================="
+    echo "  当前防火墙转发规则 (nftables)"
+    echo "=================================="
+    if nft list table inet singbox_nat 2>/dev/null >/dev/null; then
+        echo "表: inet singbox_nat"
+        echo "--------------------------------"
+        nft -a list chain inet singbox_nat prerouting 2>/dev/null || echo "无转发链"
+    else
+        echo "暂无端口跳跃转发规则"
+    fi
+    echo "=================================="
+    echo
+    
     info "正在配置防火墙转发 (端口跳跃)..."
     
     local default_dest="443"
