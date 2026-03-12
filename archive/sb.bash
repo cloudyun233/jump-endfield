@@ -114,14 +114,20 @@ restart_singbox(){
     info "正在验证和格式化配置文件..."
     
     # 格式化配置文件
-    if "$SINGBOX_BIN" format -w -c "$SINGBOX_CONF_PATH"; then
+    "$SINGBOX_BIN" format -w -c "$SINGBOX_CONF_PATH"
+    local format_result=$?
+    
+    if [[ $format_result -eq 0 ]]; then
         info "配置文件已格式化。"
     else
         warn "配置文件格式化失败，可能存在语法错误。"
     fi
     
     # 验证配置文件
-    if "$SINGBOX_BIN" check -c "$SINGBOX_CONF_PATH"; then
+    "$SINGBOX_BIN" check -c "$SINGBOX_CONF_PATH"
+    local check_result=$?
+    
+    if [[ $check_result -eq 0 ]]; then
         info "配置文件验证通过。"
     else
         err "配置文件验证失败，请检查配置！"
