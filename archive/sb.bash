@@ -336,7 +336,7 @@ config_port_hopping(){
     read -rp "请输入目标端口 (即 Hy2/TUIC 实际监听的端口) [默认: $default_dest]: " dest_port
     dest_port=${dest_port:-$default_dest}
     
-    local default_hops="443,2053,2083,2087,2096,8443,9443"
+    local default_hops="443,2053,2083,2087,2096,8443"
     echo "请输入接收端口（多个端口用逗号分隔，支持范围如 2000-3000）"
     read -rp "默认 [$default_hops]: " input_ports
     input_ports=${input_ports:-$default_hops}
