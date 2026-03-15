@@ -324,12 +324,20 @@ config_port_hopping(){
         echo "表: inet singbox_nat"
         echo "--------------------------------"
         nft -a list chain inet singbox_nat prerouting 2>/dev/null || echo "无转发链"
+        echo "--------------------------------"
+        # 询问是否清除当前端口转发规则
+        read -rp "是否清除当前端口转发规则？ [y/N]: " clear_rules
+        if [[ "$clear_rules" =~ ^[Yy]$ ]]; then
+            info "正在清除端口转发规则..."
+            nft delete table inet singbox_nat 2>/dev/null || true
+            info "端口转发规则已清除。"
+            return 0
+        fi
     else
         echo "暂无端口跳跃转发规则"
     fi
     echo "=================================="
     echo
-    
     info "正在配置防火墙转发 (端口跳跃)..."
     
     local default_dest="443"
