@@ -323,7 +323,7 @@ EOF_HTML_HEAD
         size=$(human_size "$bytes")
         mtime=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '-')
         echo "      <article class=\"card\" data-name=\"${title}\">"
-        echo "        <video controls preload=\"metadata\"><source src=\"${href}\" type=\"${mime}\"></video>"
+        echo "        <video preload=\"metadata\" onmouseenter=\"this.setAttribute('controls','')\" onmouseleave=\"this.removeAttribute('controls')\" onfocus=\"this.setAttribute('controls','')\" onblur=\"this.removeAttribute('controls')\"><source src=\"${href}\" type=\"${mime}\"></video>"
         echo "        <div class=\"meta\">"
         echo "          <p class=\"title\">${title}</p>"
         echo "          <div class=\"info\"><span>${size}</span><span>${mtime}</span></div>"
@@ -702,7 +702,7 @@ async function walkVideos(dir, base = fileRoot, depth = 0, blockedRels = new Set
       } catch {}
     }
   }
-  return out.sort((a, b) => b.mtime.localeCompare(a.mtime));
+  return out.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
 }
 
 async function folderBytes(dir, depth = 0) {
@@ -1131,7 +1131,7 @@ let lastFilesSig = '';
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setMsg(text, cls=''){msg.textContent=text||'';msg.className='msg '+cls;}
 function taskHtml(t){return '<article class="task"><div class="task-top"><div><div class="task-name">'+esc(t.name)+'</div><div class="task-meta"><span>'+esc(t.downloadedText)+' / '+esc(t.lengthText)+'</span><span>'+esc(t.downloadSpeedText)+'</span><span>'+esc(t.peers)+' 个连接</span></div></div><button class="btn secondary" data-remove="'+esc(t.infoHash)+'">移除</button></div><div class="bar"><div class="fill" style="width:'+Math.max(0,Math.min(100,t.progress))+'%"></div></div></article>';}
-function fileHtml(f){return '<article class="card"><video class="media-player" controls preload="metadata" poster="'+esc(f.thumbUrl)+'"><source src="'+esc(f.url)+'" type="'+esc(f.type)+'"></video><div class="meta"><p class="title">'+esc(f.name)+'</p><div class="info"><span>'+esc(f.sizeText)+'</span><span>'+esc(f.mtime)+'</span></div><button class="open" type="button" data-play="'+esc(f.id)+'">播放</button></div></article>';}
+function fileHtml(f){return '<article class="card"><video class="media-player" preload="metadata" poster="'+esc(f.thumbUrl)+'" onmouseenter="this.setAttribute(\\'controls\\',\\'\\')" onmouseleave="this.removeAttribute(\\'controls\\')" onfocus="this.setAttribute(\\'controls\\',\\'\\')" onblur="this.removeAttribute(\\'controls\\')"><source src="'+esc(f.url)+'" type="'+esc(f.type)+'"></video><div class="meta"><p class="title">'+esc(f.name)+'</p><div class="info"><span>'+esc(f.sizeText)+'</span><span>'+esc(f.mtime)+'</span></div><button class="open" type="button" data-play="'+esc(f.id)+'">播放</button></div></article>';}
 function videoBusy(){return [...grid.querySelectorAll('video')].some(v=>!v.paused&&!v.ended);}
 function renderFiles(files){
   const sig = files.map(f=>f.id+':'+f.size+':'+f.mtime).join('|');
