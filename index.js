@@ -129,8 +129,8 @@ function main() {
   // Node 负责 HTTPS Web、React dist、WebTorrent API、/media Range。
   spawnChild('web', process.execPath, [runtimeServer], sharedEnv);
 
-  // Bash 脚本保留旧文件名，便于沿用原来的上传和排查习惯。
-  spawnChild('runtime', 'bash', [path.join('archive', 'hy2_fakeweb.sh')], sharedEnv);
+  // Bash 脚本放在根目录，便于在面板文件管理器里直接上传和排查。
+  spawnChild('runtime', 'bash', ['hy2_fakeweb.sh'], sharedEnv);
 }
 
 process.on('SIGTERM', () => shutdown(0));

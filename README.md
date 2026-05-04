@@ -22,7 +22,7 @@ npm run build
 ```text
 index.js
 server.mjs
-archive/hy2_fakeweb.sh
+hy2_fakeweb.sh
 dist/
 ```
 
