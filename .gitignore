@@ -1,5 +1,6 @@
 # IDE and editor files
 .vscode/
+.npm/
 
 # OS generated files
 Thumbs.db
@@ -15,3 +16,4 @@ Thumbs.db
 # Build artifacts
 build/
 dist/
+node_modules/

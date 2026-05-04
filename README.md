@@ -1,35 +1,71 @@
-# jump-endfield
+# Moonroom
 
-**这不是《明日方舟：终末地》官方工具！**
+Moonroom 是一个轻量的私有影视 Web 页面：支持 React 前端、磁力任务管理、视频在线播放、文件删除和简单访问密钥。页面默认只加载封面和状态，只有点击播放时才请求视频文件，适合部署在 NodeJS 24 面板环境中。
 
-纯粉丝恶搞/玩笑项目，灵感来自游戏里的跳跃机制（double jump、parkour、Ardelia 卡墙等）。
+推荐仓库名：`moonroom`
 
-- 没有 Mod、没有宏、没有游戏辅助功能  
-- 这里只有一个网页跑酷小游戏  
+# 部署教程
 
-如果你是真玩家来找跳跃技巧的，抱歉让你白跑一趟  
-推荐去官方社区、B站或 Reddit 看攻略。
+## 1. 本地构建前端
 
-**再次声明**：本仓库与 Hypergryph / 鹰角网络 / Endfield 无任何关联。
+```bash
+cd web
+npm install
+npm run build
+```
 
-## 运行教程
+构建完成后，仓库根目录会生成 `dist/`。
 
-### 运行
-下载index.html就能玩
+## 2. 上传文件
 
-## 操作说明
+把下面内容上传到服务器工作目录，例如 `/home/container`：
 
-| 按键 | 功能 |
-|------|------|
-| `A/D` 或 `←/→` | 左右移动 |
-| `空格/W` 或 `↑` | 跳跃（可双跳） |
-| `R` | 重置位置 |
+```text
+index.js
+server.mjs
+archive/hy2_fakeweb.sh
+dist/
+```
 
-触屏设备：左侧点击向左，右侧点击向右，中间点击跳跃
+## 3. 设置启动命令
 
-## 游戏模式
+面板 Startup Command 填：
 
-- **双跳演示** - 体验二段跳机制
-- **跑酷模式** - 多平台跳跃挑战
+```bash
+node /home/container/index.js
+```
 
-玩得开心~ 
+## 4. 设置环境变量
+
+在服务器面板中填写自己的值，不要把真实值提交到仓库：
+
+```bash
+TLS_CERT_IP=YOUR_SERVER_IP
+HTTP_LISTEN_PORT=YOUR_PORT
+DOWNLOAD_MAX_ACTIVE=1
+DOWNLOAD_MAX_QUEUE=3
+DOWNLOAD_KEY=YOUR_OPTIONAL_WEB_KEY
+```
+
+如果不需要 Web 操作密钥，可以留空 `DOWNLOAD_KEY`。
+
+## 5. 访问页面
+
+启动后访问：
+
+```text
+https://YOUR_SERVER_IP:YOUR_PORT/
+```
+
+使用自签证书时，浏览器会提示证书不受信任，手动继续访问即可。
+
+## 6. 更新前端
+
+修改 `web/` 后重新构建：
+
+```bash
+cd web
+npm run build
+```
+
+然后上传新的 `dist/` 覆盖服务器上的旧版本。
