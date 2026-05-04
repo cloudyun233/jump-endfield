@@ -1,1425 +1,332 @@
-﻿#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# =============================================================================
+# hy2_fakeweb_diag_slim.sh
+# 精简诊断版：Hysteria2 + 中文影视网页 + WebTorrent 磁力下载 + trackerlist
+#
+# 保留功能：
+#   - sing-box/HY2 UDP 服务，HTTP 伪装反代到本机 Node 服务
+#   - 中文影片网页、视频在线播放、Range 请求
+#   - 磁力下载、任务进度、任务移除
+#   - tracker 列表默认来自 https://cf.trackerslist.com/all.txt
+#   - 影片删除功能，复用同一个访问密钥验证
+#   - 磁盘空间显示、本周匿名访客统计
+#   - 详细阶段日志、错误行号、失败命令、磁盘诊断、Node 日志尾部
+#
+# 推荐环境：KataBump / Pterodactyl 类非 root Node 容器。
+# 启动方式：bash start.sh，或者 node index.js 前台拉起。
+# =============================================================================
 
-# ================== 端口设置 ==================
-# HY2 使用 UDP/QUIC；HTTP 伪装站使用 TCP/HTTP。
-# 两者可以使用同一个数字端口，因为一个监听 UDP，一个监听 TCP。
-export HY2_PORT=${HY2_PORT:-"20164"}
-export NGINX_HTTP_PORT=${NGINX_HTTP_PORT:-"${HY2_PORT}"}
-export HTTP_LISTEN_PORT=${HTTP_LISTEN_PORT:-"${NGINX_HTTP_PORT}"}
+set -Eeuo pipefail
 
-# 启用磁力下载功能后，HTTP 站点必须有后端 API，所以默认强制使用 Node.js HTTP 服务。
-export ENABLE_MAGNET_DOWNLOADER=${ENABLE_MAGNET_DOWNLOADER:-"1"}
-export NGINX_AUTO_INSTALL=${NGINX_AUTO_INSTALL:-"1"}
-export FORCE_NODE_HTTP=${FORCE_NODE_HTTP:-"0"}
-if [ "$ENABLE_MAGNET_DOWNLOADER" = "1" ]; then
-  export FORCE_NODE_HTTP="1"
-fi
-
-# 下载设置：默认只允许同时 1 个活跃磁力任务，避免小容器被打爆。
-export DOWNLOAD_MAX_ACTIVE=${DOWNLOAD_MAX_ACTIVE:-"1"}
-# 排队设置：默认最多 3 个等待任务，超过后拒绝，避免无限堆积内存和磁盘压力。
-export DOWNLOAD_MAX_QUEUE=${DOWNLOAD_MAX_QUEUE:-"3"}
-# 下载鉴权：默认自动生成并保存访问密钥，避免公网用户随意提交磁力任务。
-# 如确实想完全开放提交，可显式设置 DOWNLOAD_KEY_MODE=none。
-export DOWNLOAD_KEY=${DOWNLOAD_KEY:-""}
-export DOWNLOAD_KEY_MODE=${DOWNLOAD_KEY_MODE:-"auto"}
-
-# ================== SNI 设置 ==================
-export HY2_SNI=${HY2_SNI:-"iroha.cloudyun.qzz.io"}
-
-# ================== 强制切换到脚本所在目录 ==================
+# -------------------------- 基础路径与日志 --------------------------
 cd "$(dirname "$0")"
+export FILE_PATH="${FILE_PATH:-${PWD}/.npm/video}"
+export DATA_PATH="${DATA_PATH:-${PWD}/singbox_data}"
+export HTTP_RUNTIME_DIR="${HTTP_RUNTIME_DIR:-${FILE_PATH}/http_runtime}"
+export DOWNLOAD_DIR="${DOWNLOAD_DIR:-${FILE_PATH}/downloads}"
+export NODE_SERVER_JS="${NODE_SERVER_JS:-${HTTP_RUNTIME_DIR}/server.mjs}"
+export NODE_PID_FILE="${NODE_PID_FILE:-${HTTP_RUNTIME_DIR}/server.pid}"
+export STARTUP_LOG="${STARTUP_LOG:-${HTTP_RUNTIME_DIR}/startup.log}"
+export NODE_LOG="${NODE_LOG:-${HTTP_RUNTIME_DIR}/node_http.log}"
+mkdir -p "$FILE_PATH" "$DATA_PATH" "$HTTP_RUNTIME_DIR" "$DOWNLOAD_DIR"
 
-# ================== 环境变量 & 绝对路径 ==================
-export FILE_PATH="${PWD}/.npm/video"
-export DATA_PATH="${PWD}/singbox_data"
-export NGINX_WEB_ROOT="${FILE_PATH}/nginx_www"
-export HTTP_RUNTIME_DIR="${FILE_PATH}/http_runtime"
-export NGINX_PREFIX="${HTTP_RUNTIME_DIR}/nginx"
-export NODE_SERVER_JS="${HTTP_RUNTIME_DIR}/hy2_video_http_server.mjs"
-export NODE_PID_FILE="${HTTP_RUNTIME_DIR}/hy2_video_http_server.pid"
-export PYTHON_PID_FILE="${HTTP_RUNTIME_DIR}/hy2_video_python_http.pid"
-export DOWNLOAD_DIR="${FILE_PATH}/downloads"
-mkdir -p "$FILE_PATH" "$DATA_PATH" "$NGINX_WEB_ROOT/media" "$HTTP_RUNTIME_DIR" "$DOWNLOAD_DIR"
+log() {
+  # 避免使用 tee 管道，降低 set -e/pipefail 下的误退出概率。
+  local level="$1"; shift
+  local line
+  line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
+  printf '%s\n' "$line"
+  printf '%s\n' "$line" >> "$STARTUP_LOG" 2>/dev/null || true
+}
 
-# ================== 下载访问密钥 ==================
-DOWNLOAD_KEY_FILE="${FILE_PATH}/download_key.txt"
-if [ "${DOWNLOAD_KEY_MODE}" = "none" ]; then
-  export DOWNLOAD_KEY=""
-elif [ -z "${DOWNLOAD_KEY}" ]; then
-  if [ -f "$DOWNLOAD_KEY_FILE" ]; then
-    export DOWNLOAD_KEY=$(cat "$DOWNLOAD_KEY_FILE")
-    echo -e "\e[1;32m[访问密钥] 已复用本地下载密钥：${DOWNLOAD_KEY_FILE}\e[0m"
-  else
-    if command -v openssl >/dev/null 2>&1; then
-      export DOWNLOAD_KEY=$(openssl rand -hex 16)
-    else
-      export DOWNLOAD_KEY=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
-    fi
-    echo "$DOWNLOAD_KEY" > "$DOWNLOAD_KEY_FILE"
-    chmod 600 "$DOWNLOAD_KEY_FILE"
-    echo -e "\e[1;32m[访问密钥] 已自动生成下载密钥：${DOWNLOAD_KEY}\e[0m"
-    echo -e "\e[1;32m[访问密钥] 密钥文件：${DOWNLOAD_KEY_FILE}\e[0m"
-  fi
-else
-  echo -e "\e[1;32m[访问密钥] 已使用环境变量 DOWNLOAD_KEY\e[0m"
-fi
+section() { log "STEP" "========== $* =========="; }
 
-HTTP_SERVER_MODE=""
-HTTP_SERVER_PID=""
-
-# ================== UUID 固定保存（HY2 密码）==================
-UUID_FILE="${FILE_PATH}/uuid.txt"
-if [ -f "$UUID_FILE" ]; then
-  UUID=$(cat "$UUID_FILE")
-  echo -e "\e[1;33m[HY2] 复用固定密码: $UUID\e[0m"
-else
-  UUID=$(cat /proc/sys/kernel/random/uuid)
-  echo "$UUID" > "$UUID_FILE"
-  chmod 600 "$UUID_FILE"
-  echo -e "\e[1;32m[HY2] 首次生成并永久保存密码: $UUID\e[0m"
-fi
-
-# ================== 下载工具 ==================
-download_file() {
-  local URL=$1
-  local FILENAME=$2
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -L -sS -o "$FILENAME" "$URL" && echo -e "\e[1;32m下载 $FILENAME (curl)\e[0m"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$FILENAME" "$URL" && echo -e "\e[1;32m下载 $FILENAME (wget)\e[0m"
-  else
-    echo -e "\e[1;31m未找到 curl 或 wget\e[0m"
-    exit 1
+print_diag() {
+  log "DIAG" "pwd=$(pwd)"
+  log "DIAG" "user=$(id -u 2>/dev/null || echo '?'):$(id -g 2>/dev/null || echo '?') shell=$SHELL"
+  log "DIAG" "FILE_PATH=$FILE_PATH"
+  log "DIAG" "HTTP_RUNTIME_DIR=$HTTP_RUNTIME_DIR"
+  log "DIAG" "DOWNLOAD_DIR=$DOWNLOAD_DIR"
+  log "DIAG" "磁盘空间："
+  df -h "$FILE_PATH" 2>&1 || true
+  log "DIAG" "inode："
+  df -ih "$FILE_PATH" 2>&1 || true
+  log "DIAG" "目录占用 Top 20："
+  du -sh "$FILE_PATH"/* "$FILE_PATH"/.[!.]* 2>/dev/null | sort -hr | head -n 20 || true
+  if [ -f "$NODE_LOG" ]; then
+    log "DIAG" "Node HTTP 日志尾部：$NODE_LOG"
+    tail -n 80 "$NODE_LOG" 2>/dev/null || true
   fi
 }
 
+on_error() {
+  local rc="$?"
+  local cmd="${BASH_COMMAND:-unknown}"
+  local line="${BASH_LINENO[0]:-${LINENO}}"
+  log "ERROR" "脚本失败：exit=$rc line=$line cmd=$cmd"
+  print_diag
+  exit "$rc"
+}
+trap on_error ERR
+
+if [ "${HY2_DEBUG:-0}" = "1" ]; then
+  export PS4='+ [${BASH_SOURCE##*/}:${LINENO}] '
+  set -x
+fi
+
+# -------------------------- 用户可配参数 --------------------------
+export HY2_PORT="${HY2_PORT:-20164}"
+export HTTP_LISTEN_PORT="${HTTP_LISTEN_PORT:-$HY2_PORT}"
+export HY2_SNI="${HY2_SNI:-iroha.cloudyun.qzz.io}"
+export DOWNLOAD_MAX_ACTIVE="${DOWNLOAD_MAX_ACTIVE:-1}"
+export DOWNLOAD_MAX_QUEUE="${DOWNLOAD_MAX_QUEUE:-3}"
+export DOWNLOAD_MAX_CONNS="${DOWNLOAD_MAX_CONNS:-32}"
+export DOWNLOAD_KEY_MODE="${DOWNLOAD_KEY_MODE:-auto}"       # auto | none
+export DOWNLOAD_KEY="${DOWNLOAD_KEY:-}"
+export TRACKER_LIST_URL="${TRACKER_LIST_URL:-https://cf.trackerslist.com/all.txt}"
+export TRACKER_LIST_CACHE_FILE="${TRACKER_LIST_CACHE_FILE:-${FILE_PATH}/trackers_all.txt}"
+export SINGBOX_BIN="${SINGBOX_BIN:-${FILE_PATH}/sing-box}"
+export SINGBOX_AUTO_UPDATE="${SINGBOX_AUTO_UPDATE:-1}"
+export SINGBOX_MIN_FREE_MB="${SINGBOX_MIN_FREE_MB:-120}"
+
+# -------------------------- 工具函数 --------------------------
 fetch_text() {
-  local URL=$1
-
+  local url="$1"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$URL"
+    curl -fsSL --connect-timeout 8 --max-time 30 "$url"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "$URL"
+    wget -qO- --timeout=30 "$url"
   else
-    echo -e "\e[1;31m未找到 curl 或 wget\e[0m"
+    log "ERROR" "未找到 curl 或 wget"
+    return 1
+  fi
+}
+
+download_file() {
+  local url="$1" out="$2"
+  log "INFO" "下载：$url -> $out"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --connect-timeout 8 --max-time 120 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" --timeout=120 "$url"
+  else
+    log "ERROR" "未找到 curl 或 wget"
+    return 1
+  fi
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+free_mb() {
+  df -Pm "$FILE_PATH" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0
+}
+
+check_free_space() {
+  local free
+  free="$(free_mb)"
+  log "INFO" "当前可用空间：${free} MiB"
+  if [ -n "$free" ] && [ "$free" -lt "$SINGBOX_MIN_FREE_MB" ]; then
+    log "ERROR" "空间不足：安装/更新 sing-box 至少建议 ${SINGBOX_MIN_FREE_MB} MiB"
+    print_diag
     exit 1
   fi
 }
 
-fetch_quiet() {
-  local URL=$1
+# -------------------------- 密钥与 HY2 密码 --------------------------
+setup_keys() {
+  section "初始化密码和访问密钥"
 
-  if command -v curl >/dev/null 2>&1; then
-    curl -s --max-time 2 "$URL"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- --timeout=2 "$URL"
+  local uuid_file="$FILE_PATH/uuid.txt"
+  if [ -f "$uuid_file" ]; then
+    UUID="$(cat "$uuid_file")"
+    log "INFO" "[HY2] 复用固定密码：$UUID"
   else
-    return 1
+    UUID="$(cat /proc/sys/kernel/random/uuid)"
+    printf '%s\n' "$UUID" > "$uuid_file"
+    chmod 600 "$uuid_file" || true
+    log "INFO" "[HY2] 首次生成固定密码：$UUID"
   fi
-}
+  export UUID
 
-# ================== 通用工具 ==================
-human_size() {
-  local BYTES=${1:-0}
-  awk -v b="$BYTES" 'BEGIN {
-    split("B KB MB GB TB PB", u, " ");
-    i=1;
-    while (b>=1024 && i<6) { b/=1024; i++ }
-    if (i==1) printf "%d %s", b, u[i]; else printf "%.2f %s", b, u[i]
-  }'
-}
-
-html_escape() {
-  local s="$1"
-  s=${s//&/&amp;}
-  s=${s//</&lt;}
-  s=${s//>/&gt;}
-  s=${s//\"/&quot;}
-  s=${s//\'/&#39;}
-  printf '%s' "$s"
-}
-
-urlencode() {
-  local LC_ALL=C
-  local s="$1"
-  local out=""
-  local i c hex
-  for ((i=0; i<${#s}; i++)); do
-    c=${s:i:1}
-    case "$c" in
-      [a-zA-Z0-9.~_-]) out+="$c" ;;
-      *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
-    esac
-  done
-  printf '%s' "$out"
-}
-
-video_mime_type() {
-  local name="${1,,}"
-  case "$name" in
-    *.mp4|*.m4v) printf 'video/mp4' ;;
-    *.webm) printf 'video/webm' ;;
-    *.mkv) printf 'video/x-matroska' ;;
-    *.mov) printf 'video/quicktime' ;;
-    *.avi) printf 'video/x-msvideo' ;;
-    *.ts) printf 'video/mp2t' ;;
-    *.m3u8) printf 'application/vnd.apple.mpegurl' ;;
-    *) printf 'application/octet-stream' ;;
-  esac
-}
-
-# ================== 视频页生成 ==================
-collect_video_files() {
-  VIDEO_FILES=()
-  while IFS= read -r -d '' f; do
-    VIDEO_FILES+=("$f")
-  done < <(find "$FILE_PATH" -maxdepth 1 -type f \
-    \( -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.avi' -o -iname '*.ts' -o -iname '*.m3u8' \) \
-    -print0 | sort -z)
-}
-
-sync_video_webroot() {
-  mkdir -p "$NGINX_WEB_ROOT/media"
-  find "$NGINX_WEB_ROOT/media" -mindepth 1 -maxdepth 1 -type l -delete 2>/dev/null || true
-
-  collect_video_files
-
-  for f in "${VIDEO_FILES[@]}"; do
-    [ -f "$f" ] || continue
-    ln -sf "$f" "${NGINX_WEB_ROOT}/media/$(basename "$f")"
-  done
-}
-
-generate_video_page() {
-  sync_video_webroot
-
-  local INDEX_FILE="${NGINX_WEB_ROOT}/index.html"
-  local COUNT=${#VIDEO_FILES[@]}
-  local NOW
-  NOW=$(date '+%Y-%m-%d %H:%M:%S')
-
-  cat > "$INDEX_FILE" <<'EOF_HTML_HEAD'
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>月光放映室</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #080910;
-      --ink: #fff8ec;
-      --soft: #d2c2ac;
-      --muted: #8f8273;
-      --gold: #f0c77b;
-      --amber: #d9893d;
-      --violet: #7f6df2;
-      --card: rgba(255,255,255,.082);
-      --card-2: rgba(255,255,255,.13);
-      --line: rgba(255,255,255,.16);
-      --shadow: rgba(0,0,0,.42);
-      --display: "LXGW WenKai Screen", "霞鹜文楷", "STKaiti", "KaiTi", "Songti SC", serif;
-      --sans: "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
-      --mono: "Maple Mono", "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-    }
-    * { box-sizing: border-box; }
-    html { height: 100%; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      font-family: var(--sans);
-      font-size: 15px;
-      letter-spacing: .01em;
-      background:
-        radial-gradient(circle at 14% 4%, rgba(240,199,123,.28), transparent 29rem),
-        radial-gradient(circle at 88% 2%, rgba(127,109,242,.22), transparent 31rem),
-        radial-gradient(circle at 68% 106%, rgba(217,137,61,.16), transparent 24rem),
-        linear-gradient(140deg, #04050a 0%, #0c101a 54%, #17100b 100%);
-      height: 100vh;
-      height: 100dvh;
-      overflow: hidden;
-      text-rendering: optimizeLegibility;
-      -webkit-font-smoothing: antialiased;
-    }
-    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .22; background-image: linear-gradient(rgba(255,255,255,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px); background-size: 44px 44px; mask-image: linear-gradient(to bottom, rgba(0,0,0,.9), transparent 76%); }
-    a { color: inherit; }
-    .wrap { width: min(1260px, calc(100% - 28px)); height: 100vh; height: 100dvh; margin: 0 auto; padding: 15px 0; display: flex; flex-direction: column; gap: 12px; }
-    .nav { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 36px; position: relative; z-index: 2; }
-    .brand { display: flex; align-items: center; gap: 11px; font-family: var(--display); font-size: 18px; font-weight: 700; letter-spacing: .08em; }
-    .logo { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 12px; background: linear-gradient(135deg, rgba(240,199,123,.98), rgba(255,255,255,.22)); color: #120d08; box-shadow: 0 12px 30px rgba(240,199,123,.2); font-family: var(--sans); }
-    .navlinks { display: flex; gap: 8px; flex-wrap: wrap; color: var(--soft); font-size: 12px; }
-    .navlinks span { border: 1px solid var(--line); border-radius: 999px; padding: 6px 11px; background: rgba(255,255,255,.05); backdrop-filter: blur(12px); }
-    .hero { position: relative; overflow: hidden; padding: 22px; border: 1px solid var(--line); border-radius: 26px; background: linear-gradient(120deg, rgba(255,255,255,.135), rgba(255,255,255,.045)), linear-gradient(135deg, rgba(240,199,123,.15), rgba(127,109,242,.1)); box-shadow: 0 20px 62px var(--shadow); backdrop-filter: blur(20px); }
-    .hero::after { content: ""; position: absolute; inset: auto -10% -72% 40%; height: 210px; background: radial-gradient(circle, rgba(240,199,123,.24), transparent 62%); pointer-events: none; }
-    .eyebrow { margin: 0 0 7px; color: var(--gold); font-family: var(--mono); font-size: 11px; font-weight: 800; letter-spacing: .24em; text-transform: uppercase; }
-    h1 { margin: 0; max-width: 780px; font-family: var(--display); font-size: clamp(31px, 4.6vw, 56px); font-weight: 700; line-height: .98; letter-spacing: -.035em; }
-    .sub { margin: 10px 0 0; color: var(--soft); font-size: 14px; line-height: 1.75; max-width: 680px; }
-
-
-    .section-title { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin: 0 3px; }
-    .section-title h2 { margin: 0; font-family: var(--display); font-size: 20px; letter-spacing: .01em; }
-    .section-title p { margin: 0; color: var(--muted); font-size: 12px; }
-    .grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); align-content: start; gap: 12px; overflow: hidden; }
-    .card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--card); box-shadow: 0 14px 38px rgba(0,0,0,.25); transition: transform .22s ease, border-color .22s ease, background .22s ease, box-shadow .22s ease; }
-    .card:hover { transform: translateY(-3px); border-color: rgba(240,199,123,.42); background: var(--card-2); box-shadow: 0 18px 48px rgba(0,0,0,.32); }
-    .poster { position: relative; aspect-ratio: 16 / 9; max-height: 154px; display: grid; place-items: center; overflow: hidden; text-decoration: none; background: linear-gradient(135deg, rgba(240,199,123,.2), rgba(127,109,242,.18)), #05070b; color: var(--ink); }
-    video { width: 100%; aspect-ratio: 16 / 9; display: block; background: #05070b; object-fit: contain; }
-    .poster::before { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(0,0,0,.04), rgba(0,0,0,.62)); z-index: 1; }
-    .poster-mark { position: relative; z-index: 2; width: 48px; height: 48px; display: grid; place-items: center; border-radius: 999px; background: rgba(5,7,11,.62); border: 1px solid rgba(255,255,255,.22); box-shadow: 0 12px 30px rgba(0,0,0,.32); }
-    .poster-name { position: absolute; left: 12px; right: 12px; bottom: 10px; z-index: 2; color: rgba(255,248,236,.86); font-size: 12px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .meta { padding: 11px 12px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; }
-    .title { margin: 0; font-size: 13px; font-weight: 800; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .info { color: var(--soft); font-family: var(--mono); font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; grid-column: 1 / -1; }
-    .open { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; border: 1px solid rgba(240,199,123,.32); border-radius: 999px; padding: 7px 10px; background: rgba(240,199,123,.12); color: var(--ink); font-family: var(--sans); font-size: 12px; font-weight: 800; cursor: pointer; }
-    .empty { flex: 1; min-height: 0; padding: 22px; border: 1px dashed rgba(240,199,123,.28); border-radius: 20px; background: rgba(255,255,255,.055); color: var(--soft); line-height: 1.75; }
-    footer { color: rgba(255,248,236,.44); font-family: var(--mono); font-size: 11px; text-align: center; }
-    @media (max-width: 640px) {
-      .wrap { width: calc(100% - 16px); padding: 8px 0; gap: 8px; }
-      .nav { align-items: flex-start; flex-direction: column; gap: 8px; }
-      .brand { font-size: 17px; }
-      .navlinks { display: none; }
-      .hero { padding: 16px; border-radius: 20px; }
-      h1 { font-size: clamp(30px, 10vw, 42px); }
-      .section-title { align-items: flex-start; flex-direction: column; }
-      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-      .poster { max-height: 120px; }
-      .meta { grid-template-columns: 1fr; }
-      .open { justify-content: center; }
-    }
-  </style>
-</head>
-<body>
-  <main class="wrap">
-    <nav class="nav" aria-label="站点导航">
-      <div class="brand"><span class="logo">▶</span><span>月光放映室</span></div>
-      <div class="navlinks"><span>精选</span><span>片库</span><span>稍后观看</span></div>
-    </nav>
-    <section class="hero">
-      <p class="eyebrow">私人片库</p>
-      <h1>今晚想看点什么？</h1>
-      <p class="sub">浏览已有影片，选择一个标题，就可以在浏览器中直接播放。</p>
-EOF_HTML_HEAD
-
-  {
-    echo "    </section>"
-
-    if [ "$COUNT" -eq 0 ]; then
-      echo "    <section class=\"empty\">"
-      echo "      片库正在准备中，新的影片会出现在这里。"
-      echo "    </section>"
+  local key_file="$FILE_PATH/download_key.txt"
+  if [ "$DOWNLOAD_KEY_MODE" = "none" ]; then
+    export DOWNLOAD_KEY=""
+    log "WARN" "访问密钥已关闭：公网不建议"
+  elif [ -n "$DOWNLOAD_KEY" ]; then
+    log "INFO" "访问密钥来自环境变量 DOWNLOAD_KEY"
+  elif [ -f "$key_file" ]; then
+    DOWNLOAD_KEY="$(cat "$key_file")"
+    export DOWNLOAD_KEY
+    log "INFO" "[访问密钥] 复用：$key_file"
+  else
+    if have_cmd openssl; then
+      DOWNLOAD_KEY="$(openssl rand -hex 16)"
     else
-      echo "    <section id=\"grid\" class=\"grid\">"
-      for f in "${VIDEO_FILES[@]}"; do
-        [ -f "$f" ] || continue
-        base=$(basename "$f")
-        title=$(html_escape "$base")
-        href="media/$(urlencode "$base")"
-        mime=$(video_mime_type "$base")
-        bytes=$(stat -c%s "$f" 2>/dev/null || wc -c < "$f")
-        size=$(human_size "$bytes")
-        mtime=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '-')
-        echo "      <article class=\"card\" data-name=\"${title}\">"
-        echo "        <video preload=\"metadata\" onmouseenter=\"this.setAttribute('controls','')\" onmouseleave=\"this.removeAttribute('controls')\" onfocus=\"this.setAttribute('controls','')\" onblur=\"this.removeAttribute('controls')\"><source src=\"${href}\" type=\"${mime}\"></video>"
-        echo "        <div class=\"meta\">"
-        echo "          <p class=\"title\">${title}</p>"
-        echo "          <div class=\"info\"><span>${size}</span><span>${mtime}</span></div>"
-        echo "          <button class=\"open\" type=\"button\" onclick=\"this.closest('article').querySelector('video').play()\">播放</button>"
-        echo "        </div>"
-        echo "      </article>"
-      done
-      echo "    </section>"
+      local u
+      u="$(cat /proc/sys/kernel/random/uuid)"
+      DOWNLOAD_KEY="${u//-/}"
     fi
-
-    echo "    <footer>月光放映室 · 更新时间 ${NOW}</footer>"
-  } >> "$INDEX_FILE"
-
-  cat >> "$INDEX_FILE" <<'EOF_HTML_FOOT'
-  </main>
-
-
-</body>
-</html>
-EOF_HTML_FOOT
-
-  echo -e "\e[1;32m[HTTP伪装] 视频页面已生成: ${INDEX_FILE}\e[0m"
+    export DOWNLOAD_KEY
+    printf '%s\n' "$DOWNLOAD_KEY" > "$key_file"
+    chmod 600 "$key_file" || true
+    log "INFO" "[访问密钥] 已生成：$DOWNLOAD_KEY"
+    log "INFO" "[访问密钥] 文件：$key_file"
+  fi
 }
 
-# ================== HTTP 伪装服务：优先 nginx，本地无权限时 fallback 到 Node/Python ==================
-try_install_nginx_if_root() {
-  if command -v nginx >/dev/null 2>&1; then
+# -------------------------- sing-box 安装/复用 --------------------------
+singbox_version() {
+  local bin="$1"
+  [ -x "$bin" ] || return 1
+  local out
+  out="$($bin version 2>/dev/null || true)"
+  case "$out" in
+    *sing-box*) : ;;
+    *) return 1 ;;
+  esac
+  if [[ "$out" =~ ([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
     return 0
   fi
+  return 1
+}
 
-  if [ "$NGINX_AUTO_INSTALL" = "0" ]; then
-    return 1
+install_singbox() {
+  section "检查 sing-box"
+
+  local local_ver=""
+  if [ -x "$SINGBOX_BIN" ]; then
+    local_ver="$(singbox_version "$SINGBOX_BIN" || true)"
   fi
 
-  if [ "$(id -u)" != "0" ]; then
-    echo -e "\e[1;33m[Nginx] 未检测到 nginx，且当前不是 root，跳过 apt/yum/apk 安装，改用免安装 HTTP fallback\e[0m"
-    return 1
-  fi
-
-  echo -e "\e[1;33m[Nginx] 未检测到 nginx，当前是 root，尝试用系统包管理器安装...\e[0m"
-
-  set +e
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y nginx
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y nginx
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache nginx
-  elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm nginx
+  if [ -n "$local_ver" ]; then
+    log "INFO" "检测到本地 sing-box：$SINGBOX_BIN version=$local_ver"
+    if [ "$SINGBOX_AUTO_UPDATE" = "0" ]; then
+      log "INFO" "SINGBOX_AUTO_UPDATE=0，跳过联网检查"
+      return 0
+    fi
   else
-    false
-  fi
-  local rc=$?
-  set -e
-
-  if [ "$rc" -ne 0 ] || ! command -v nginx >/dev/null 2>&1; then
-    echo -e "\e[1;33m[Nginx] 自动安装失败，改用免安装 HTTP fallback\e[0m"
-    return 1
+    log "INFO" "未检测到可用固定 sing-box：$SINGBOX_BIN"
   fi
 
-  return 0
-}
+  check_free_space
 
-write_nginx_local_conf() {
-  mkdir -p "${NGINX_PREFIX}/conf" "${NGINX_PREFIX}/logs" "${NGINX_PREFIX}/client_body_temp" \
-           "${NGINX_PREFIX}/proxy_temp" "${NGINX_PREFIX}/fastcgi_temp" "${NGINX_PREFIX}/uwsgi_temp" "${NGINX_PREFIX}/scgi_temp"
+  local arch sb_arch latest_json latest_ver
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) sb_arch="amd64" ;;
+    aarch64|arm64) sb_arch="arm64" ;;
+    armv7l|armv7) sb_arch="armv7" ;;
+    armv6l|armv6) sb_arch="armv6" ;;
+    s390x) sb_arch="s390x" ;;
+    *) log "ERROR" "不支持的架构：$arch"; exit 1 ;;
+  esac
+  log "INFO" "系统架构：$arch -> sing-box linux-$sb_arch"
 
-  cat > "${NGINX_PREFIX}/conf/nginx.conf" <<EOF_NGINX
-worker_processes  1;
-error_log  logs/error.log warn;
-pid        logs/nginx.pid;
+  log "INFO" "获取 sing-box latest release 元数据"
+  latest_json="$(fetch_text 'https://api.github.com/repos/SagerNet/sing-box/releases/latest')"
+  if [[ "$latest_json" =~ \"tag_name\"[[:space:]]*:[[:space:]]*\"v?([^\"]+)\" ]]; then
+    latest_ver="${BASH_REMATCH[1]}"
+  else
+    log "ERROR" "无法解析 sing-box 最新版本号"
+    exit 1
+  fi
+  log "INFO" "GitHub latest：v$latest_ver"
 
-events {
-    worker_connections  1024;
-}
-
-http {
-    default_type application/octet-stream;
-    sendfile on;
-    tcp_nopush on;
-    keepalive_timeout 65;
-    access_log off;
-
-    server {
-        listen 0.0.0.0:${HTTP_LISTEN_PORT};
-        listen [::]:${HTTP_LISTEN_PORT} ipv6only=on;
-        server_name _;
-
-        root "${NGINX_WEB_ROOT}";
-        index index.html;
-        charset utf-8;
-        etag on;
-
-        location = / {
-            try_files /index.html =404;
-        }
-
-        location = /index.html {
-            try_files /index.html =404;
-        }
-
-        location /media/ {
-            types {
-                video/mp4 mp4 m4v;
-                video/webm webm;
-                video/x-matroska mkv;
-                video/quicktime mov;
-                video/x-msvideo avi;
-                video/mp2t ts;
-                application/vnd.apple.mpegurl m3u8;
-            }
-            default_type application/octet-stream;
-            add_header Accept-Ranges bytes always;
-            add_header X-Content-Type-Options nosniff always;
-            try_files \$uri =404;
-        }
-
-        location / {
-            return 404;
-        }
-    }
-}
-EOF_NGINX
-}
-
-start_nginx_local() {
-  if [ "$FORCE_NODE_HTTP" = "1" ]; then
-    return 1
+  if [ -n "$local_ver" ] && [ "$local_ver" = "$latest_ver" ]; then
+    log "INFO" "本地 sing-box 已是最新，跳过下载"
+    return 0
   fi
 
-  try_install_nginx_if_root || return 1
-  write_nginx_local_conf
+  local tmp tarball url src
+  tmp="$FILE_PATH/.singbox_tmp"
+  rm -rf "$tmp"
+  mkdir -p "$tmp"
+  tarball="sing-box-${latest_ver}-linux-${sb_arch}.tar.gz"
+  url="https://github.com/SagerNet/sing-box/releases/download/v${latest_ver}/${tarball}"
 
-  local CONF_FILE="${NGINX_PREFIX}/conf/nginx.conf"
-
-  set +e
-  nginx -p "${NGINX_PREFIX}/" -c "$CONF_FILE" -t >/dev/null 2>&1
-  local test_rc=$?
-  set -e
-  if [ "$test_rc" -ne 0 ]; then
-    echo -e "\e[1;33m[Nginx] 本地配置测试失败，改用 HTTP fallback\e[0m"
-    return 1
+  download_file "$url" "$tmp/$tarball"
+  log "INFO" "解压 sing-box 包"
+  tar -xzf "$tmp/$tarball" -C "$tmp"
+  src="$(find "$tmp" -type f -name sing-box -perm /111 -print -quit 2>/dev/null || true)"
+  if [ -z "$src" ]; then
+    log "ERROR" "压缩包中未找到 sing-box 二进制"
+    exit 1
   fi
 
-  if [ -f "${NGINX_PREFIX}/logs/nginx.pid" ]; then
-    nginx -p "${NGINX_PREFIX}/" -c "$CONF_FILE" -s quit >/dev/null 2>&1 || true
-    sleep 1
-  fi
-
-  set +e
-  nginx -p "${NGINX_PREFIX}/" -c "$CONF_FILE" >/dev/null 2>&1
-  local start_rc=$?
-  set -e
-
-  if [ "$start_rc" -ne 0 ]; then
-    echo -e "\e[1;33m[Nginx] 启动失败，可能端口已被占用，改用 HTTP fallback\e[0m"
-    return 1
-  fi
-
-  HTTP_SERVER_MODE="nginx"
-  echo -e "\e[1;32m[Nginx] 已以用户态本地配置启动，监听 TCP/HTTP 端口: ${HTTP_LISTEN_PORT}\e[0m"
-  echo -e "\e[1;32m[Nginx] 本地配置: ${CONF_FILE}\e[0m"
-  return 0
+  mv -f "$src" "$SINGBOX_BIN.new"
+  chmod +x "$SINGBOX_BIN.new"
+  mv -f "$SINGBOX_BIN.new" "$SINGBOX_BIN"
+  rm -rf "$tmp"
+  log "INFO" "sing-box 已安装/更新：$SINGBOX_BIN version=$(singbox_version "$SINGBOX_BIN" || echo unknown)"
 }
 
-write_node_http_server() {
-  cat > "$NODE_SERVER_JS" <<'EOF_NODE'
-import http from 'node:http';
-import fs from 'node:fs';
-import fsp from 'node:fs/promises';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { URL } from 'node:url';
-
-const port = Number(process.env.HTTP_LISTEN_PORT || process.env.NGINX_HTTP_PORT || process.env.HY2_PORT || 20164);
-const fileRoot = path.resolve(process.env.FILE_PATH || path.join(process.cwd(), '.npm/video'));
-const downloadRoot = path.resolve(process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads'));
-const maxActive = Math.max(1, Number(process.env.DOWNLOAD_MAX_ACTIVE || 1));
-const maxQueued = Math.max(0, Number(process.env.DOWNLOAD_MAX_QUEUE || 3));
-const downloadKey = process.env.DOWNLOAD_KEY || '';
-const statusCacheMs = Math.max(1000, Number(process.env.STATUS_CACHE_MS || 5000));
-const visitorFile = path.join(fileRoot, 'weekly_visitors.json');
-let statusCache = null;
-let statusCacheAt = 0;
-let visitorState = { weekKey: currentWeekKey(), visitors: [] };
-let visitorSet = new Set();
-let visitorPersistTimer = null;
-
-await fsp.mkdir(downloadRoot, { recursive: true });
-await loadVisitorState();
-
-let WebTorrent = null;
-let webtorrentLoadError = '';
-try {
-  const mod = await import('webtorrent');
-  WebTorrent = mod.default || mod.WebTorrent || mod;
-} catch (err) {
-  webtorrentLoadError = err?.message || String(err);
-}
-
-const client = WebTorrent ? new WebTorrent({ maxConns: Math.max(12, Number(process.env.DOWNLOAD_MAX_CONNS || 32)) }) : null;
-const addedAt = new Map();
-const errors = new Map();
-const queuedDownloads = [];
-const queuedIndex = new Map();
-const torrentTasks = new Map();
-
-const videoExts = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.ts', '.m3u8']);
-const skipDirs = new Set(['http_runtime', 'nginx_www', 'node_modules', '.git', '.cache']);
-
-const types = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.mp4': 'video/mp4',
-  '.m4v': 'video/mp4',
-  '.webm': 'video/webm',
-  '.mkv': 'video/x-matroska',
-  '.mov': 'video/quicktime',
-  '.avi': 'video/x-msvideo',
-  '.ts': 'video/mp2t',
-  '.m3u8': 'application/vnd.apple.mpegurl'
-};
-
-function human(bytes) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  let n = Number(bytes || 0);
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return i === 0 ? `${n} ${units[i]}` : `${n.toFixed(2)} ${units[i]}`;
-}
-
-function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-}
-
-function idFromRel(rel) {
-  return Buffer.from(rel, 'utf8').toString('base64url');
-}
-
-function relFromId(id) {
-  try { return Buffer.from(String(id || ''), 'base64url').toString('utf8'); }
-  catch { return ''; }
-}
-
-function safeInside(root, target) {
-  const r = path.resolve(root);
-  const t = path.resolve(target);
-  return t === r || t.startsWith(r + path.sep);
-}
-
-function currentWeekKey(ts = Date.now()) {
-  const d = new Date(ts + 8 * 60 * 60 * 1000);
-  const day = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() - day + 1);
-  return d.toISOString().slice(0, 10);
-}
-
-async function loadVisitorState() {
-  try {
-    const data = JSON.parse(await fsp.readFile(visitorFile, 'utf8'));
-    if (data?.weekKey === currentWeekKey() && Array.isArray(data.visitors)) {
-      visitorState = { weekKey: data.weekKey, visitors: data.visitors.filter(Boolean) };
-    }
-  } catch {}
-  visitorSet = new Set(visitorState.visitors);
-  if (visitorState.weekKey !== currentWeekKey()) {
-    visitorState = { weekKey: currentWeekKey(), visitors: [] };
-    visitorSet = new Set();
-    scheduleVisitorPersist();
-  }
-}
-
-function scheduleVisitorPersist() {
-  if (visitorPersistTimer) return;
-  visitorPersistTimer = setTimeout(async () => {
-    visitorPersistTimer = null;
-    const body = JSON.stringify(visitorState);
-    const tmp = `${visitorFile}.tmp`;
-    try {
-      await fsp.writeFile(tmp, body, { mode: 0o600 });
-      await fsp.rename(tmp, visitorFile);
-    } catch {}
-  }, 250);
-}
-
-function visitorFingerprint(req) {
-  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  const ip = forwarded || req.socket?.remoteAddress || '';
-  const ua = String(req.headers['user-agent'] || '');
-  return crypto.createHash('sha256').update(`${ip.replace(/^::ffff:/, '')}|${ua}`).digest('hex').slice(0, 24);
-}
-
-function recordVisit(req) {
-  const weekKey = currentWeekKey();
-  if (visitorState.weekKey !== weekKey) {
-    visitorState = { weekKey, visitors: [] };
-    visitorSet = new Set();
-  }
-  const id = visitorFingerprint(req);
-  if (!visitorSet.has(id)) {
-    visitorSet.add(id);
-    visitorState.visitors.push(id);
-    scheduleVisitorPersist();
-    clearStatusCache();
-  }
-}
-
-function visitorStats() {
-  return {
-    weekKey: visitorState.weekKey,
-    weeklyVisitors: visitorSet.size
-  };
-}
-
-function hashString(s) {
-  let h = 2166136261;
-  for (let i = 0; i < String(s).length; i++) {
-    h ^= String(s).charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-function thumbSvg(name) {
-  const h = hashString(name) % 360;
-  const h2 = (h + 42) % 360;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img" aria-label="视频缩略图">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="hsl(${h} 48% 24%)"/>
-      <stop offset="1" stop-color="hsl(${h2} 58% 18%)"/>
-    </linearGradient>
-  </defs>
-  <rect width="640" height="360" fill="url(#g)"/>
-  <path d="M0 250C90 214 128 330 229 278C326 228 365 140 461 164C544 185 590 250 640 226V360H0Z" fill="#ffffff" fill-opacity=".08"/>
-  <circle cx="320" cy="164" r="54" fill="#000000" fill-opacity=".42" stroke="#ffffff" stroke-opacity=".24" stroke-width="2"/>
-  <path d="M306 132v64l50-32z" fill="#fff8ec" fill-opacity=".92"/>
-</svg>`;
-}
-
-async function walkVideos(dir, base = fileRoot, depth = 0, blockedRels = new Set()) {
-  if (depth > 6) return [];
-  let entries = [];
-  try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return []; }
-  const out = [];
-  for (const ent of entries) {
-    if (ent.name.startsWith('.') && ent.name !== '.npm') continue;
-    if (skipDirs.has(ent.name)) continue;
-    const full = path.join(dir, ent.name);
-    if (!safeInside(fileRoot, full)) continue;
-    if (ent.isDirectory()) {
-      out.push(...await walkVideos(full, base, depth + 1, blockedRels));
-    } else if (ent.isFile() && videoExts.has(path.extname(ent.name).toLowerCase())) {
-      try {
-        const st = await fsp.stat(full);
-        const rel = path.relative(fileRoot, full).split(path.sep).join('/');
-        if (blockedRels.has(rel)) continue;
-        const ext = path.extname(ent.name).toLowerCase();
-        const id = idFromRel(rel);
-        out.push({
-          id,
-          name: ent.name,
-          rel,
-          size: st.size,
-          sizeText: human(st.size),
-          mtime: st.mtime.toISOString().slice(0, 16).replace('T', ' '),
-          type: types[ext] || 'application/octet-stream',
-          url: `/media/${id}`,
-          thumbUrl: `/thumb/${id}`
-        });
-      } catch {}
-    }
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-}
-
-async function folderBytes(dir, depth = 0) {
-  if (depth > 8) return 0;
-  let entries = [];
-  try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return 0; }
-  let total = 0;
-  for (const ent of entries) {
-    if (skipDirs.has(ent.name)) continue;
-    const full = path.join(dir, ent.name);
-    if (!safeInside(fileRoot, full)) continue;
-    try {
-      const st = await fsp.stat(full);
-      if (ent.isDirectory()) total += await folderBytes(full, depth + 1);
-      else if (ent.isFile()) total += st.size;
-    } catch {}
-  }
-  return total;
-}
-
-async function getSpace() {
-  let total = 0, free = 0, used = 0, available = 0;
-  try {
-    const s = await fsp.statfs(fileRoot);
-    const bsize = Number(s.bsize || 0);
-    total = Number(s.blocks || 0) * bsize;
-    free = Number(s.bfree || 0) * bsize;
-    available = Number(s.bavail || 0) * bsize;
-    used = Math.max(0, total - free);
-  } catch {
-    const lib = await folderBytes(fileRoot);
-    total = 0; free = 0; available = 0; used = lib;
-  }
-  const libraryBytes = await folderBytes(fileRoot);
-  const usedPct = total ? Math.round((used / total) * 1000) / 10 : 0;
-  return {
-    total, free, available, used, libraryBytes, usedPct,
-    totalText: total ? human(total) : '—',
-    freeText: free ? human(free) : '—',
-    availableText: available ? human(available) : '—',
-    usedText: total ? human(used) : human(libraryBytes),
-    libraryText: human(libraryBytes)
-  };
-}
-
-const base32Chars = 'abcdefghijklmnopqrstuvwxyz234567';
-
-function safeDecodeComponent(value) {
-  try { return decodeURIComponent(String(value || '')); }
-  catch { return String(value || ''); }
-}
-
-function base32BtihToHex(value) {
-  let bits = '';
-  for (const ch of String(value || '').toLowerCase().replace(/=+$/g, '')) {
-    const idx = base32Chars.indexOf(ch);
-    if (idx < 0) return '';
-    bits += idx.toString(2).padStart(5, '0');
-  }
-  let hex = '';
-  for (let i = 0; i + 4 <= bits.length; i += 4) {
-    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
-  }
-  return hex;
-}
-
-function normalizeBtih(value) {
-  const btih = safeDecodeComponent(value).trim().toLowerCase();
-  if (/^[a-f0-9]{40}$/.test(btih)) return btih;
-  if (/^[a-z2-7]{32}$/.test(btih)) {
-    const hex = base32BtihToHex(btih);
-    if (/^[a-f0-9]{40}$/.test(hex)) return hex;
-  }
-  return btih;
-}
-
-function magnetTaskId(magnet) {
-  const m = /(?:^|[?&])xt=urn:btih:([^&]+)/i.exec(String(magnet || ''));
-  return m?.[1] ? normalizeBtih(m[1]) : Buffer.from(String(magnet || '')).toString('base64url').slice(0, 32).toLowerCase();
-}
-
-function createDownloadManager({ maxActive = 1, maxQueued = 3 } = {}) {
-  const tasks = [];
-  function activeCount() { return tasks.filter(t => t.state === 'downloading').length; }
-  function queuedCount() { return tasks.filter(t => t.state === 'queued').length; }
-  function startNext() {
-    while (activeCount() < maxActive) {
-      const next = tasks.find(t => t.state === 'queued');
-      if (!next) break;
-      next.state = 'downloading';
-      next.startedAt = Date.now();
-    }
-  }
-  function enqueue(magnet) {
-    if (queuedCount() >= maxQueued && activeCount() >= maxActive) throw new Error(`排队任务已满，最多等待 ${maxQueued} 个`);
-    const id = magnetTaskId(magnet);
-    if (tasks.some(t => t.id === id && t.state !== 'completed' && t.state !== 'removed')) throw new Error('这个磁力任务已经在下载或排队中');
-    const task = { id, magnet, state: 'queued', addedAt: Date.now(), startedAt: 0 };
-    tasks.push(task);
-    startNext();
-    return task;
-  }
-  function complete(id) {
-    const task = tasks.find(t => t.id === id);
-    if (task) task.state = 'completed';
-    startNext();
-  }
-  function remove(id) {
-    const task = tasks.find(t => t.id === id);
-    if (task) task.state = 'removed';
-    startNext();
-  }
-  function visibleTasks() { return tasks.filter(t => t.state !== 'completed' && t.state !== 'removed'); }
-  return { enqueue, complete, remove, visibleTasks, activeCount, queuedCount };
-}
-
-function queuedView(task) {
-  return {
-    infoHash: task.id,
-    id: task.id,
-    name: task.name || `排队任务 ${task.id.slice(0, 8)}`,
-    progress: 0,
-    downloaded: 0,
-    downloadedText: '0 B',
-    length: 0,
-    lengthText: '等待中',
-    downloadSpeed: 0,
-    downloadSpeedText: '排队中',
-    uploadSpeed: 0,
-    peers: 0,
-    done: false,
-    paused: true,
-    state: 'queued',
-    addedAt: task.addedAt || Date.now(),
-    error: task.error || ''
-  };
-}
-
-function activeTaskCount() {
-  return liveTorrents().length;
-}
-
-function queuedTaskCount() {
-  return queuedDownloads.length;
-}
-
-function taskTotalCount() {
-  return activeTaskCount() + queuedTaskCount();
-}
-
-function removeQueuedTask(id) {
-  const task = queuedIndex.get(id);
-  if (!task) return false;
-  const idx = queuedDownloads.findIndex(t => t === task || t.id === id);
-  if (idx >= 0) queuedDownloads.splice(idx, 1);
-  cleanupTaskMaps(id);
-  return true;
-}
-
-function clearStatusCache() {
-  statusCache = null;
-  statusCacheAt = 0;
-}
-
-function cleanupTaskMaps(id) {
-  const task = id ? (torrentTasks.get(id) || queuedIndex.get(id)) : null;
-  const ids = new Set();
-  if (id) ids.add(id);
-  if (task?.id) ids.add(task.id);
-  if (task) {
-    for (const [key, value] of torrentTasks) {
-      if (value === task) ids.add(key);
-    }
-    for (const [key, value] of queuedIndex) {
-      if (value === task) ids.add(key);
-    }
-  }
-  for (const key of ids) {
-    addedAt.delete(key);
-    errors.delete(key);
-    torrentTasks.delete(key);
-    queuedIndex.delete(key);
-  }
-}
-
-function isLiveTorrent(torrent) {
-  return !!torrent && !torrent.done && !torrent.destroyed;
-}
-
-function liveTorrents() {
-  return client ? client.torrents.filter(isLiveTorrent) : [];
-}
-
-function getClientTorrent(id) {
-  if (!client || !id) return null;
-  try { return client.get(id); }
-  catch { return null; }
-}
-
-function findLiveTorrentForTask(id) {
-  if (!client || !id) return null;
-  const task = torrentTasks.get(id) || queuedIndex.get(id);
-  const direct = getClientTorrent(id);
-  if (isLiveTorrent(direct)) return direct;
-  if (task?.id && task.id !== id) {
-    const byTaskId = getClientTorrent(task.id);
-    if (isLiveTorrent(byTaskId)) return byTaskId;
-  }
-  return client.torrents.find(t => isLiveTorrent(t) && (t.infoHash === id || (task && torrentTasks.get(t.infoHash || '') === task))) || null;
-}
-
-function pruneStaleTaskMaps() {
-  for (const id of [...torrentTasks.keys()]) {
-    if (!queuedIndex.has(id) && !findLiveTorrentForTask(id)) cleanupTaskMaps(id);
-  }
-}
-
-function hasLiveDownload(id) {
-  if (queuedIndex.has(id)) return true;
-  if (findLiveTorrentForTask(id)) return true;
-  if (torrentTasks.has(id)) cleanupTaskMaps(id);
-  return false;
-}
-
-async function removeClientTorrent(torrent, destroyStore = false) {
-  if (!client || !torrent) return;
-  await new Promise(resolve => client.remove(torrent, { destroyStore }, () => resolve()));
-}
-
-async function completeTorrent(torrent) {
-  const infoHash = normalizeBtih(torrent.infoHash || '');
-  await removeClientTorrent(torrent, false);
-  cleanupTaskMaps(infoHash);
-  startQueuedDownloads();
-}
-
-function attachTorrentEvents(torrent, fallbackId = '') {
-  const task = torrentTasks.get(fallbackId) || torrentTasks.get(torrent.infoHash || '') || null;
-  if (task) task.name = torrent.name || task.name;
-  const rememberHash = () => {
-    const id = normalizeBtih(torrent.infoHash || fallbackId);
-    if (!id) return;
-    addedAt.set(id, addedAt.get(fallbackId) || addedAt.get(id) || Date.now());
-    if (task) {
-      if (fallbackId && fallbackId !== id) {
-        addedAt.delete(fallbackId);
-        errors.delete(fallbackId);
-        torrentTasks.delete(fallbackId);
-      }
-      task.id = id;
-      task.name = torrent.name || task.name;
-      torrentTasks.set(id, task);
-    }
-  };
-  torrent.once('metadata', rememberHash);
-  torrent.once('ready', rememberHash);
-  torrent.once('done', () => {
-    rememberHash();
-    completeTorrent(torrent).catch(err => errors.set(normalizeBtih(torrent.infoHash || fallbackId), err?.message || String(err)));
-  });
-  torrent.once('error', err => {
-    const id = normalizeBtih(torrent.infoHash || fallbackId);
-    errors.set(id, err?.message || String(err));
-    removeClientTorrent(torrent, false).finally(() => {
-      cleanupTaskMaps(id);
-      clearStatusCache();
-      startQueuedDownloads();
-    });
-  });
-}
-
-function startQueuedDownloads() {
-  if (!client) return;
-  while (activeTaskCount() < maxActive && queuedDownloads.length) {
-    const task = queuedDownloads.shift();
-    queuedIndex.delete(task.id);
-    try {
-      task.state = 'downloading';
-      task.startedAt = Date.now();
-      const torrent = client.add(task.magnet, { path: downloadRoot, deselect: false });
-      torrentTasks.set(task.id, task);
-      const infoHash = normalizeBtih(torrent.infoHash || '');
-      if (infoHash) {
-        torrentTasks.set(infoHash, task);
-        addedAt.set(infoHash, task.addedAt);
-      }
-      attachTorrentEvents(torrent, task.id);
-      clearStatusCache();
-    } catch (err) {
-      errors.set(task.id, err?.message || String(err));
-    }
-  }
-}
-function torrentView(t) {
-  const infoHash = t.infoHash || '';
-  return {
-    infoHash,
-    name: t.name || t.dn || (infoHash ? `Import ${infoHash.slice(0, 8)}` : 'Preparing import'),
-    progress: Number.isFinite(t.progress) ? Math.round(t.progress * 1000) / 10 : 0,
-    downloaded: t.downloaded || 0,
-    downloadedText: human(t.downloaded || 0),
-    length: t.length || 0,
-    lengthText: t.length ? human(t.length) : 'metadata',
-    downloadSpeed: t.downloadSpeed || 0,
-    downloadSpeedText: `${human(t.downloadSpeed || 0)}/s`,
-    uploadSpeed: t.uploadSpeed || 0,
-    peers: t.numPeers || 0,
-    done: !!t.done,
-    paused: !!t.paused,
-    addedAt: addedAt.get(infoHash) || Date.now(),
-    error: errors.get(infoHash) || ''
-  };
-}
-
-function activeDownloadVideoRels() {
-  const rels = new Set();
-  if (!client) return rels;
-  for (const torrent of liveTorrents()) {
-    for (const file of torrent.files || []) {
-      const full = path.resolve(downloadRoot, file.path || file.name || '');
-      if (!safeInside(fileRoot, full) || !videoExts.has(path.extname(full).toLowerCase())) continue;
-      rels.add(path.relative(fileRoot, full).split(path.sep).join('/'));
-    }
-  }
-  return rels;
-}
-
-async function statusPayload() {
-  const now = Date.now();
-  pruneStaleTaskMaps();
-  if (statusCache && now - statusCacheAt < statusCacheMs) {
-    return { ...statusCache, visitors: visitorStats(), torrents: client ? [...liveTorrents().map(torrentView), ...queuedDownloads.map(queuedView)].sort((a, b) => b.addedAt - a.addedAt) : [] };
-  }
-  const files = await walkVideos(fileRoot, fileRoot, 0, activeDownloadVideoRels());
-  const space = await getSpace();
-  const torrents = client ? [...liveTorrents().map(torrentView), ...queuedDownloads.map(queuedView)].sort((a, b) => b.addedAt - a.addedAt) : [];
-  const payload = {
-    ok: true,
-    site: '月光放映室',
-    downloadEnabled: !!client,
-    downloadAuthRequired: !!downloadKey,
-    downloadError: client ? '' : webtorrentLoadError,
-    maxActive,
-    maxQueued,
-    queued: queuedTaskCount(),
-    files,
-    space,
-    visitors: visitorStats(),
-    torrents
-  };
-  statusCache = payload;
-  statusCacheAt = now;
-  return payload;
-}
-
-function sendJson(res, code, data) {
-  const body = JSON.stringify(data);
-  res.writeHead(code, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-    'Cache-Control': 'no-store'
-  });
-  res.end(body);
-}
-
-function sendText(res, code, text) {
-  res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(text);
-}
-
-async function readBody(req, limit = 8192) {
-  let body = '';
-  for await (const chunk of req) {
-    body += chunk;
-    if (body.length > limit) throw new Error('request body too large');
-  }
-  return body;
-}
-
-function authorized(req) {
-  if (!downloadKey) return true;
-  const got = req.headers['x-library-key'] || '';
-  return got === downloadKey;
-}
-
-async function addMagnet(req, res) {
-  if (!client) return sendJson(res, 503, { ok: false, error: `下载器不可用：${webtorrentLoadError}` });
-  if (!authorized(req)) return sendJson(res, 401, { ok: false, error: '访问密钥不正确或缺失' });
-
-  let data;
-  try { data = JSON.parse(await readBody(req)); }
-  catch { return sendJson(res, 400, { ok: false, error: '请求格式无效' }); }
-
-  const magnet = String(data?.magnet || '').trim();
-  if (!magnet.startsWith('magnet:?') || !/xt=urn:btih:/i.test(magnet) || magnet.length > 8192) {
-    return sendJson(res, 400, { ok: false, error: '请输入有效的 BitTorrent 磁力链接' });
-  }
-
-  const id = magnetTaskId(magnet);
-  pruneStaleTaskMaps();
-  if (hasLiveDownload(id)) {
-    return sendJson(res, 409, { ok: false, error: '这个磁力任务已经在下载或排队中' });
-  }
-  if (activeTaskCount() >= maxActive && queuedTaskCount() >= maxQueued) {
-    return sendJson(res, 429, { ok: false, error: `排队任务已满，当前最多 ${maxActive} 个下载中、${maxQueued} 个等待中` });
-  }
-
-  const task = { id, magnet, state: 'queued', name: `排队任务 ${id.slice(0, 8)}`, addedAt: Date.now(), startedAt: 0 };
-  addedAt.set(id, task.addedAt);
-  clearStatusCache();
-  if (activeTaskCount() < maxActive) {
-    try {
-      task.state = 'downloading';
-      task.startedAt = Date.now();
-      const torrent = client.add(magnet, { path: downloadRoot, deselect: false });
-      torrentTasks.set(id, task);
-      const infoHash = normalizeBtih(torrent.infoHash || '');
-      if (infoHash) {
-        torrentTasks.set(infoHash, task);
-        addedAt.set(infoHash, task.addedAt);
-      }
-      attachTorrentEvents(torrent, id);
-      return sendJson(res, 202, { ok: true, torrent: torrentView(torrent) });
-    } catch (err) {
-      cleanupTaskMaps(id);
-      return sendJson(res, 500, { ok: false, error: err?.message || String(err) });
-    }
-  }
-
-  queuedDownloads.push(task);
-  queuedIndex.set(id, task);
-  return sendJson(res, 202, { ok: true, torrent: queuedView(task) });
-}
-
-async function removeTorrent(req, res, infoHash) {
-  if (!client) return sendJson(res, 503, { ok: false, error: '下载器不可用' });
-  if (!authorized(req)) return sendJson(res, 401, { ok: false, error: '访问密钥不正确或缺失' });
-  if (removeQueuedTask(infoHash)) {
-    clearStatusCache();
-    return sendJson(res, 200, { ok: true });
-  }
-  const t = client.get(infoHash);
-  if (!t) return sendJson(res, 404, { ok: false, error: '未找到任务' });
-  try {
-    await removeClientTorrent(t, false);
-    cleanupTaskMaps(infoHash);
-    startQueuedDownloads();
-    return sendJson(res, 200, { ok: true });
-  } catch (err) {
-    return sendJson(res, 500, { ok: false, error: err?.message || String(err) });
-  }
-}
-
-if (process.env.HY2_NODE_SELFTEST === '1') {
-  const test = await import('node:test');
-  const assert = await import('node:assert/strict');
-
-  test.test('下载队列只启动一个任务且最多允许三个等待任务', () => {
-    const manager = createDownloadManager({ maxActive: 1, maxQueued: 3 });
-    manager.enqueue('magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-    manager.enqueue('magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
-    manager.enqueue('magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc');
-    manager.enqueue('magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd');
-    assert.equal(manager.activeCount(), 1);
-    assert.equal(manager.queuedCount(), 3);
-    assert.throws(() => manager.enqueue('magnet:?xt=urn:btih:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'), /排队任务已满/);
-  });
-
-  test.test('任务完成后从列表消失并启动下一个排队任务', () => {
-    const manager = createDownloadManager({ maxActive: 1, maxQueued: 3 });
-    const first = manager.enqueue('magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-    const second = manager.enqueue('magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
-    manager.complete(first.id);
-    const visible = manager.visibleTasks();
-    assert.equal(visible.some(t => t.id === first.id), false);
-    assert.equal(visible.some(t => t.id === second.id && t.state === 'downloading'), true);
-  });
-
-  test.test('base32 BTIH 会规范成 WebTorrent 使用的 hex infoHash', () => {
-    const base32Magnet = 'magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-    const hexMagnet = 'magnet:?xt=urn:btih:0000000000000000000000000000000000000000';
-    const manager = createDownloadManager({ maxActive: 1, maxQueued: 3 });
-    const first = manager.enqueue(base32Magnet);
-    assert.equal(first.id, '0000000000000000000000000000000000000000');
-    assert.throws(() => manager.enqueue(hexMagnet), /下载或排队/);
-  });
-
-  test.test('清理任务索引会删除同一个任务的所有别名', () => {
-    const task = { id: '0000000000000000000000000000000000000000', magnet: '' };
-    torrentTasks.set('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', task);
-    torrentTasks.set(task.id, task);
-    addedAt.set('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', Date.now());
-    addedAt.set(task.id, Date.now());
-    cleanupTaskMaps(task.id);
-    assert.equal(torrentTasks.has('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), false);
-    assert.equal(torrentTasks.has(task.id), false);
-    assert.equal(addedAt.has('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), false);
-  });
-}
-function renderPage() {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>月光放映室</title>
-  <style>
-    :root{color-scheme:dark;--ink:#fff8ec;--soft:#d2c2ac;--muted:#8f8273;--gold:#f0c77b;--amber:#d9893d;--violet:#7f6df2;--green:#8ee6bd;--red:#ff9f9f;--card:rgba(255,255,255,.082);--card2:rgba(255,255,255,.13);--line:rgba(255,255,255,.16);--shadow:rgba(0,0,0,.42);--display:"LXGW WenKai Screen","霞鹜文楷","STKaiti","KaiTi","Songti SC",serif;--sans:"HarmonyOS Sans SC","MiSans","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;--mono:"Maple Mono","Cascadia Code","SFMono-Regular",Consolas,monospace}
-    *{box-sizing:border-box}html,body{min-height:100%}body{margin:0;color:var(--ink);font-family:var(--sans);font-size:15px;letter-spacing:.01em;background:radial-gradient(circle at 14% 4%,rgba(240,199,123,.28),transparent 29rem),radial-gradient(circle at 88% 2%,rgba(127,109,242,.22),transparent 31rem),radial-gradient(circle at 68% 106%,rgba(217,137,61,.16),transparent 24rem),linear-gradient(140deg,#04050a 0%,#0c101a 54%,#17100b 100%);height:100vh;height:100dvh;overflow:hidden;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;background-image:linear-gradient(rgba(255,255,255,.055) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.9),transparent 76%)}a{color:inherit}.wrap{width:min(1260px,calc(100% - 28px));height:100vh;height:100dvh;margin:0 auto;padding:14px 0;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;gap:12px}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:36px;position:relative;z-index:2}.brand{display:flex;align-items:center;gap:11px;font-family:var(--display);font-size:18px;font-weight:700;letter-spacing:.08em}.logo{width:34px;height:34px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(135deg,rgba(240,199,123,.98),rgba(255,255,255,.22));color:#120d08;box-shadow:0 12px 30px rgba(240,199,123,.2);font-family:var(--sans)}.navlinks{display:flex;gap:8px;flex-wrap:wrap;color:var(--soft);font-size:12px}.navlinks span{border:1px solid var(--line);border-radius:999px;padding:6px 11px;background:rgba(255,255,255,.05);backdrop-filter:blur(12px)}.hero{position:relative;overflow:hidden;display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,430px);gap:20px;align-items:stretch;padding:22px;border:1px solid var(--line);border-radius:26px;background:linear-gradient(120deg,rgba(255,255,255,.135),rgba(255,255,255,.045)),linear-gradient(135deg,rgba(240,199,123,.15),rgba(127,109,242,.1));box-shadow:0 20px 62px var(--shadow);backdrop-filter:blur(20px)}.hero::after{content:"";position:absolute;inset:auto -10% -72% 40%;height:210px;background:radial-gradient(circle,rgba(240,199,123,.24),transparent 62%);pointer-events:none}.hero-main,.quick-panel{position:relative;z-index:1}.eyebrow{margin:0 0 7px;color:var(--gold);font-family:var(--mono);font-size:11px;font-weight:800;letter-spacing:.24em;text-transform:uppercase}h1{margin:0;max-width:780px;font-family:var(--display);font-size:clamp(31px,4.6vw,56px);font-weight:700;line-height:.98;letter-spacing:-.035em}.sub{margin:10px 0 0;color:var(--soft);font-size:14px;line-height:1.75;max-width:680px}.visit-stat{margin-top:14px;display:inline-flex;align-items:baseline;gap:7px;border:1px solid rgba(240,199,123,.26);border-radius:999px;padding:7px 12px;background:rgba(5,7,11,.24);color:var(--soft);font-size:12px}.visit-stat strong{color:var(--gold);font-family:var(--mono);font-size:18px;line-height:1}.quick-panel{display:grid;gap:12px;padding:14px;border:1px solid rgba(255,255,255,.14);border-radius:20px;background:rgba(5,7,11,.34);box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}.panel-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.panel-title h2{margin:0;font-family:var(--display);font-size:18px}.form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}.input{width:100%;min-width:0;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.1);color:var(--ink);padding:11px 13px;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.07);font-family:var(--sans)}.input:focus{border-color:rgba(240,199,123,.55);box-shadow:0 0 0 4px rgba(240,199,123,.11),inset 0 1px 0 rgba(255,255,255,.08)}.input::placeholder{color:rgba(255,248,236,.48)}.btn{border:0;border-radius:14px;padding:11px 14px;background:linear-gradient(135deg,var(--gold),var(--amber));color:#1b1108;font-weight:900;cursor:pointer;box-shadow:0 12px 30px rgba(217,137,61,.18)}.btn.secondary{border:1px solid var(--line);background:rgba(255,255,255,.07);color:var(--ink);box-shadow:none}.keyline{display:none}.hint,.msg{margin:0;color:var(--muted);font-size:12px;line-height:1.65}.msg.good{color:var(--green)}.msg.bad{color:var(--red)}.meters{display:grid;gap:8px}.meter-row{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--soft);font-size:12px}.meter-row strong{color:var(--ink);font-family:var(--mono);font-size:12px}.bar{height:8px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.11)}.fill{width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--violet),var(--gold));transition:width .35s ease}.workspace{min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,340px);gap:12px}.library,.side{min-height:0;display:grid;gap:10px}.library{grid-template-rows:auto minmax(0,1fr)}.side{grid-template-rows:auto minmax(0,1fr)}.section-title{display:flex;align-items:end;justify-content:space-between;gap:12px;margin:0 3px}.section-title h2{margin:0;font-family:var(--display);font-size:20px;letter-spacing:.01em}.section-title p{margin:0;color:var(--muted);font-size:12px}.grid{min-height:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));align-content:start;gap:12px;overflow:auto;padding-right:2px}.card{min-width:0;overflow:hidden;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:0 14px 38px rgba(0,0,0,.25);transition:transform .22s ease,border-color .22s ease,background .22s ease,box-shadow .22s ease}.card:hover{transform:translateY(-3px);border-color:rgba(240,199,123,.42);background:var(--card2);box-shadow:0 18px 48px rgba(0,0,0,.32)}video{width:100%;aspect-ratio:16/9;max-height:154px;background:#05070b;display:block;object-fit:contain}.poster{position:relative;aspect-ratio:16/9;max-height:154px;display:block;overflow:hidden;background:#05070b;text-decoration:none}.poster:before{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(0,0,0,.03),rgba(0,0,0,.62));pointer-events:none}.thumb{width:100%;height:100%;display:block;object-fit:cover}.poster-play{position:absolute;z-index:2;left:50%;top:50%;width:48px;height:48px;display:grid;place-items:center;transform:translate(-50%,-50%);border-radius:999px;border:1px solid rgba(255,255,255,.22);background:rgba(5,7,11,.62);box-shadow:0 12px 30px rgba(0,0,0,.32)}.poster-name{position:absolute;z-index:2;left:12px;right:12px;bottom:10px;color:rgba(255,248,236,.86);font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{padding:11px 12px 12px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 10px}.title{margin:0;font-size:13px;font-weight:800;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.info{color:var(--soft);font-family:var(--mono);font-size:11px;display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1}.open{display:inline-flex;align-items:center;gap:6px;text-decoration:none;border:1px solid rgba(240,199,123,.32);border-radius:999px;padding:7px 10px;background:rgba(240,199,123,.12);color:var(--ink);font-size:12px;font-weight:800}.tasks{min-height:0;overflow:auto;display:grid;align-content:start;gap:10px}.task{border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.07);padding:12px}.task-top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}.task-name{font-weight:900;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-meta{margin-top:5px;color:var(--soft);font-family:var(--mono);font-size:11px;display:flex;gap:8px;flex-wrap:wrap}.empty{min-height:0;padding:22px;border:1px dashed rgba(240,199,123,.28);border-radius:20px;background:rgba(255,255,255,.055);color:var(--soft);line-height:1.75}footer{color:rgba(255,248,236,.44);font-family:var(--mono);font-size:11px;text-align:center}@media (max-width:900px){body{height:auto;min-height:100vh;overflow:auto}.wrap{width:min(100% - 18px,760px);height:auto;min-height:100vh;grid-template-rows:auto auto auto auto;padding:10px 0}.hero,.workspace{grid-template-columns:1fr}.side{grid-template-rows:auto}.grid,.tasks{overflow:visible}.quick-panel{gap:10px}}@media (max-width:640px){body{font-size:14px}.wrap{width:calc(100% - 14px);gap:9px}.nav{align-items:flex-start;flex-direction:column;gap:8px}.brand{font-size:17px}.navlinks{display:none}.hero{padding:15px;border-radius:20px}.sub{font-size:13px}.visit-stat{margin-top:12px}.quick-panel{padding:12px;border-radius:17px}.panel-title{align-items:flex-start;flex-direction:column}.form{grid-template-columns:1fr}.btn{width:100%;min-height:42px}.grid{grid-template-columns:1fr;gap:10px}video,.poster{max-height:none}.meta{grid-template-columns:1fr}.open{justify-content:center}.task-top{grid-template-columns:1fr}.task .btn{width:100%}}
-    .open{font-family:var(--sans);cursor:pointer}.media-player{width:100%;aspect-ratio:16/9;max-height:none;background:#05070b;display:block;object-fit:contain}
-  </style>
-</head>
-<body>
-  <main class="wrap">
-    <nav class="nav" aria-label="站点导航"><div class="brand"><span class="logo">▶</span><span>月光放映室</span></div><div class="navlinks"><span>精选</span><span>片库</span><span>导入</span></div></nav>
-    <section class="hero">
-      <div class="hero-main"><p class="eyebrow">私人片库</p><h1>今晚想看点什么？</h1><p class="sub">浏览已有影片，也可以直接导入新的磁力任务。下载完成后，影片会自动出现在片库中。</p><div class="visit-stat"><span>本周已访问</span><strong id="visitorCount">—</strong><span>人</span></div></div>
-      <div class="quick-panel">
-        <div class="panel-title"><h2>导入影片</h2><span class="hint">磁力任务</span></div>
-        <div class="form"><input id="magnet" class="input" placeholder="粘贴 magnet 磁力链接" autocomplete="off"><button id="add" class="btn">开始导入</button></div>
-        <div id="keyline" class="keyline"><input id="key" class="input" placeholder="访问密钥" autocomplete="off"></div>
-        <div class="meters"><div class="meter-row"><span>已用空间</span><strong id="used">—</strong></div><div class="bar"><div class="fill" id="spacebar"></div></div><div class="meter-row"><span>可用空间</span><strong id="free">—</strong></div><div class="meter-row"><span>片库占用</span><strong id="libsize">—</strong></div></div>
-        <p class="hint">可播放的视频文件会自动出现在片库中，下载进度会实时刷新。</p><div id="msg" class="msg"></div>
-      </div>
-    </section>
-    <section class="workspace">
-      <section class="library"><div class="section-title"><div><h2>正在放映</h2><p>可播放影片</p></div></div><section id="grid" class="grid"><div class="empty">片库正在准备中，新的影片会出现在这里。</div></section></section>
-      <aside class="side"><div class="section-title"><div><h2>下载任务</h2><p>实时传输进度</p></div></div><section id="tasks" class="tasks"><div class="empty">暂无下载任务。</div></section></aside>
-    </section>
-    <footer>月光放映室</footer>
-  </main>
-<script>
-const $ = s => document.querySelector(s);
-const grid = $('#grid'), tasks = $('#tasks'), msg = $('#msg');
-let authRequired = false;
-let lastFilesSig = '';
-function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function setMsg(text, cls=''){msg.textContent=text||'';msg.className='msg '+cls;}
-function taskHtml(t){return '<article class="task"><div class="task-top"><div><div class="task-name">'+esc(t.name)+'</div><div class="task-meta"><span>'+esc(t.downloadedText)+' / '+esc(t.lengthText)+'</span><span>'+esc(t.downloadSpeedText)+'</span><span>'+esc(t.peers)+' 个连接</span></div></div><button class="btn secondary" data-remove="'+esc(t.infoHash)+'">移除</button></div><div class="bar"><div class="fill" style="width:'+Math.max(0,Math.min(100,t.progress))+'%"></div></div></article>';}
-function fileHtml(f){return '<article class="card"><video class="media-player" preload="metadata" poster="'+esc(f.thumbUrl)+'" onmouseenter="this.setAttribute(\\'controls\\',\\'\\')" onmouseleave="this.removeAttribute(\\'controls\\')" onfocus="this.setAttribute(\\'controls\\',\\'\\')" onblur="this.removeAttribute(\\'controls\\')"><source src="'+esc(f.url)+'" type="'+esc(f.type)+'"></video><div class="meta"><p class="title">'+esc(f.name)+'</p><div class="info"><span>'+esc(f.sizeText)+'</span><span>'+esc(f.mtime)+'</span></div><button class="open" type="button" data-play="'+esc(f.id)+'">播放</button></div></article>';}
-function videoBusy(){return [...grid.querySelectorAll('video')].some(v=>!v.paused&&!v.ended);}
-function renderFiles(files){
-  const sig = files.map(f=>f.id+':'+f.size+':'+f.mtime).join('|');
-  if (sig === lastFilesSig) return;
-  if (videoBusy()) return;
-  lastFilesSig = sig;
-  grid.innerHTML = files.length ? files.map(fileHtml).join('') : '<div class="empty">片库正在准备中，新的影片会出现在这里。</div>';
-}
-async function refresh(){
-  const r = await fetch('/api/status', {cache:'no-store'}); const d = await r.json();
-  authRequired = !!d.downloadAuthRequired; $('#keyline').style.display = authRequired ? 'block' : 'none';
-  $('#used').textContent = d.space.usedText + (d.space.totalText !== '—' ? ' / ' + d.space.totalText : '');
-  $('#free').textContent = d.space.availableText || d.space.freeText;
-  $('#libsize').textContent = d.space.libraryText;
-  $('#spacebar').style.width = Math.max(0, Math.min(100, d.space.usedPct || 0)) + '%';
-  $('#visitorCount').textContent = d.visitors?.weeklyVisitors ?? '—';
-  const active = d.torrents || [];
-  tasks.innerHTML = active.length ? active.map(taskHtml).join('') : '<div class="empty">暂无下载任务。</div>';
-  renderFiles(d.files || []);
-  if (!d.downloadEnabled) setMsg('下载器在此服务器不可用。', 'bad');
-}
-$('#add').addEventListener('click', async()=>{
-  const magnet = $('#magnet').value.trim(); if(!magnet){setMsg('请先粘贴磁力链接。', 'bad'); return;}
-  setMsg('正在创建下载任务...', '');
-  const headers = {'Content-Type':'application/json'}; if(authRequired) headers['X-Library-Key']=$('#key').value.trim();
-  const r = await fetch('/api/downloads', {method:'POST', headers, body:JSON.stringify({magnet})}); const d = await r.json().catch(()=>({ok:false,error:'请求失败'}));
-  if(!d.ok){setMsg(d.error || '导入失败。', 'bad'); return;}
-  $('#magnet').value=''; setMsg('下载任务已创建。', 'good'); refresh();
-});
-tasks.addEventListener('click', async(e)=>{
-  const id = e.target?.dataset?.remove; if(!id) return;
-  const headers = {}; if(authRequired) headers['X-Library-Key']=$('#key').value.trim();
-  await fetch('/api/downloads/'+encodeURIComponent(id), {method:'DELETE', headers}); refresh();
-});
-grid.addEventListener('click', e=>{
-  const id = e.target?.dataset?.play; if(!id) return;
-  const video = e.target.closest('.card')?.querySelector('video');
-  if(video) video.play().catch(()=>setMsg('浏览器无法直接播放这个视频格式。', 'bad'));
-});
-grid.addEventListener('play', e=>{if(e.target?.tagName==='VIDEO'){grid.querySelectorAll('video').forEach(v=>{if(v!==e.target)v.pause();});}}, true);
-refresh(); setInterval(refresh, 5000);
-</script>
-</body>
-</html>`;
-}
-function serveThumb(req, res, id) {
-  const rel = relFromId(id);
-  if (!rel || rel.includes('\0')) return sendText(res, 403, 'Forbidden');
-  const filePath = path.resolve(fileRoot, rel);
-  if (!safeInside(fileRoot, filePath) || !videoExts.has(path.extname(filePath).toLowerCase())) return sendText(res, 403, 'Forbidden');
-  fs.stat(filePath, (err, stat) => {
-    if (err || !stat.isFile()) return sendText(res, 404, '404 Not Found');
-    const body = thumbSvg(path.basename(filePath));
-    res.writeHead(200, {
-      'Content-Type': 'image/svg+xml; charset=utf-8',
-      'Content-Length': Buffer.byteLength(body),
-      'Cache-Control': 'public, max-age=3600',
-      'X-Content-Type-Options': 'nosniff'
-    });
-    if (req.method === 'HEAD') return res.end();
-    res.end(body);
-  });
-}
-function serveMedia(req, res, id) {
-  const rel = relFromId(id);
-  if (!rel || rel.includes('\0')) return sendText(res, 403, 'Forbidden');
-  const filePath = path.resolve(fileRoot, rel);
-  if (!safeInside(fileRoot, filePath)) return sendText(res, 403, 'Forbidden');
-  fs.stat(filePath, (err, stat) => {
-    if (err || !stat.isFile()) return sendText(res, 404, '404 Not Found');
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = types[ext] || 'application/octet-stream';
-    const total = stat.size;
-    const range = req.headers.range;
-    const headOnly = req.method === 'HEAD';
-    const commonHeaders = { 'Content-Type': contentType, 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=1800' };
-    if (range) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match) { res.writeHead(416, { ...commonHeaders, 'Content-Range': `bytes */${total}` }); return res.end(); }
-      let start;
-      let end;
-      if (match[1] === '') {
-        const suffix = Number(match[2]);
-        if (!Number.isFinite(suffix) || suffix <= 0) { res.writeHead(416, { ...commonHeaders, 'Content-Range': `bytes */${total}` }); return res.end(); }
-        start = Math.max(total - suffix, 0);
-        end = total - 1;
-      } else {
-        start = Number(match[1]);
-        end = match[2] === '' ? total - 1 : Number(match[2]);
-      }
-      if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= total) { res.writeHead(416, { ...commonHeaders, 'Content-Range': `bytes */${total}` }); return res.end(); }
-      end = Math.min(end, total - 1);
-      res.writeHead(206, { ...commonHeaders, 'Content-Range': `bytes ${start}-${end}/${total}`, 'Content-Length': end - start + 1 });
-      if (headOnly) return res.end();
-      return fs.createReadStream(filePath, { start, end }).pipe(res);
-    }
-    res.writeHead(200, { ...commonHeaders, 'Content-Length': total });
-    if (headOnly) return res.end();
-    fs.createReadStream(filePath).pipe(res);
-  });
-}
-
-const server = http.createServer(async (req, res) => {
-  let pathname = '/';
-  try { pathname = new URL(req.url, 'http://127.0.0.1').pathname; }
-  catch { return sendText(res, 400, 'Bad Request'); }
-
-  try {
-    if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-      recordVisit(req);
-      const html = renderPage();
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html), 'Cache-Control': 'no-cache' });
-      return res.end(html);
-    }
-    if (req.method === 'GET' && pathname === '/api/status') return sendJson(res, 200, await statusPayload());
-    if (req.method === 'POST' && pathname === '/api/downloads') return addMagnet(req, res);
-    if (req.method === 'DELETE' && pathname.startsWith('/api/downloads/')) return removeTorrent(req, res, decodeURIComponent(pathname.slice('/api/downloads/'.length)));
-    if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith('/thumb/')) return serveThumb(req, res, decodeURIComponent(pathname.slice('/thumb/'.length)));
-    if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith('/media/')) return serveMedia(req, res, decodeURIComponent(pathname.slice('/media/'.length)));
-    return sendText(res, 404, '404 Not Found');
-  } catch (err) {
-    return sendJson(res, 500, { ok: false, error: err?.message || String(err) });
-  }
-});
-
-function listen(host) {
-  server.listen(port, host, () => {
-    console.log(`[Node HTTP] listening on ${host}:${port}, root=${fileRoot}, downloads=${downloadRoot}, downloader=${client ? 'webtorrent' : 'unavailable'}`);
-  });
-}
-
-server.on('error', (err) => {
-  if (err.code === 'EADDRNOTAVAIL' || err.code === 'EAFNOSUPPORT') {
-    console.error(`[Node HTTP] ${err.code} on ::, retrying 0.0.0.0`);
-    try { server.close(() => listen('0.0.0.0')); } catch { listen('0.0.0.0'); }
-    return;
-  }
-  console.error(err);
-  process.exit(1);
-});
-
-if (process.env.HY2_NODE_SELFTEST !== '1') {
-  listen('::');
-}
-EOF_NODE
-}
-
-stop_pid_file() {
-  local pid_file="$1"
-  if [ -f "$pid_file" ]; then
-    local old_pid
-    old_pid=$(cat "$pid_file" 2>/dev/null || true)
-    if [ -n "$old_pid" ]; then
-      kill "$old_pid" 2>/dev/null || true
-      sleep 1
+# -------------------------- TLS 证书与 sing-box 配置 --------------------------
+setup_cert_and_config() {
+  section "生成证书和 sing-box 配置"
+
+  if [ ! -f "$FILE_PATH/private.key" ] || [ ! -f "$FILE_PATH/cert.pem" ]; then
+    if have_cmd openssl; then
+      log "INFO" "使用 openssl 生成自签证书：CN=$HY2_SNI"
+      openssl ecparam -genkey -name prime256v1 -out "$FILE_PATH/private.key" 2>/dev/null
+      openssl req -new -x509 -days 3650 -key "$FILE_PATH/private.key" -out "$FILE_PATH/cert.pem" -subj "/CN=${HY2_SNI}" 2>/dev/null
+    else
+      log "ERROR" "未找到 openssl，无法生成证书。请安装 openssl 或预先放置 cert.pem/private.key"
+      exit 1
     fi
-    rm -f "$pid_file"
+  else
+    log "INFO" "复用已有 TLS 证书"
   fi
+  chmod 600 "$FILE_PATH/private.key" || true
+
+  cat > "$FILE_PATH/config.json" <<EOF_JSON
+{
+  "log": { "disabled": true },
+  "inbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": ${HY2_PORT},
+      "users": [{ "password": "${UUID}" }],
+      "masquerade": "http://127.0.0.1:${HTTP_LISTEN_PORT}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${HY2_SNI}",
+        "alpn": ["h3"],
+        "certificate_path": "${FILE_PATH}/cert.pem",
+        "key_path": "${FILE_PATH}/private.key"
+      }
+    }
+  ],
+  "outbounds": [{ "type": "direct" }]
+}
+EOF_JSON
+  log "INFO" "配置已写入：$FILE_PATH/config.json"
 }
 
-ensure_webtorrent_module() {
-  if [ "$ENABLE_MAGNET_DOWNLOADER" != "1" ]; then
+# -------------------------- Node / WebTorrent 后端 --------------------------
+ensure_webtorrent() {
+  section "检查 Node.js 和 WebTorrent"
+  if ! have_cmd node; then
+    log "ERROR" "未找到 node，精简版需要 Node.js 后端"
+    exit 1
+  fi
+  log "INFO" "Node.js: $(node -v)"
+
+  if ! have_cmd npm; then
+    log "ERROR" "未找到 npm，无法安装 WebTorrent"
+    exit 1
+  fi
+  log "INFO" "npm: $(npm -v)"
+
+  if [ -d "$HTTP_RUNTIME_DIR/node_modules/webtorrent" ]; then
+    log "INFO" "WebTorrent 模块已存在"
     return 0
   fi
 
-  if ! command -v npm >/dev/null 2>&1; then
-    echo -e "\e[1;33m[WebTorrent] 未检测到 npm，下载功能不可用，但网页仍可启动\e[0m"
-    return 0
-  fi
-
-  if [ -d "${HTTP_RUNTIME_DIR}/node_modules/webtorrent" ]; then
-    echo -e "\e[1;32m[WebTorrent] 本地模块已存在\e[0m"
-    return 0
-  fi
-
-  echo -e "\e[1;33m[WebTorrent] 首次启用磁力下载，正在安装本地 npm 模块 webtorrent...\e[0m"
-  cat > "${HTTP_RUNTIME_DIR}/package.json" <<'EOF_PACKAGE'
+  log "INFO" "首次安装 WebTorrent 到：$HTTP_RUNTIME_DIR"
+  cat > "$HTTP_RUNTIME_DIR/package.json" <<'EOF_PACKAGE'
 {
   "private": true,
   "type": "module",
@@ -1428,538 +335,225 @@ ensure_webtorrent_module() {
   }
 }
 EOF_PACKAGE
-
-  set +e
   (cd "$HTTP_RUNTIME_DIR" && npm install --omit=dev --no-audit --no-fund --loglevel=error)
-  local rc=$?
-  set -e
-
-  if [ "$rc" -ne 0 ]; then
-    echo -e "\e[1;33m[WebTorrent] npm 安装失败，下载功能会显示不可用；可检查网络或手动执行：cd ${HTTP_RUNTIME_DIR} && npm install --omit=dev --no-audit --no-fund --loglevel=error\e[0m"
-  else
-    echo -e "\e[1;32m[WebTorrent] 安装完成\e[0m"
-  fi
+  log "INFO" "WebTorrent 安装完成"
 }
 
-start_node_http_server() {
-  if ! command -v node >/dev/null 2>&1; then
-    return 1
-  fi
+write_node_server() {
+  section "写入 Node HTTP 后端"
+  cat > "$NODE_SERVER_JS" <<'EOF_NODE'
+import http from 'node:http';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { URL } from 'node:url';
 
-  ensure_webtorrent_module
-  write_node_http_server
-  stop_pid_file "$NODE_PID_FILE"
+const port = Number(process.env.HTTP_LISTEN_PORT || process.env.HY2_PORT || 20164);
+const fileRoot = path.resolve(process.env.FILE_PATH || path.join(process.cwd(), '.npm/video'));
+const downloadRoot = path.resolve(process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads'));
+const downloadKey = process.env.DOWNLOAD_KEY || '';
+const maxActive = Math.max(1, Number(process.env.DOWNLOAD_MAX_ACTIVE || 1));
+const maxQueued = Math.max(0, Number(process.env.DOWNLOAD_MAX_QUEUE || 3));
+const maxConns = Math.max(12, Number(process.env.DOWNLOAD_MAX_CONNS || 32));
+const trackerListUrl = process.env.TRACKER_LIST_URL || 'https://cf.trackerslist.com/all.txt';
+const trackerCacheFile = process.env.TRACKER_LIST_CACHE_FILE || path.join(fileRoot, 'trackers_all.txt');
+const visitorFile = path.join(fileRoot, 'weekly_visitors.json');
+const videoExts = new Set(['.mp4','.m4v','.webm','.mkv','.mov','.avi','.ts','.m3u8']);
+const skipDirs = new Set(['http_runtime','nginx_www','node_modules','.git','.cache','.singbox_tmp']);
+const mime = {'.mp4':'video/mp4','.m4v':'video/mp4','.webm':'video/webm','.mkv':'video/x-matroska','.mov':'video/quicktime','.avi':'video/x-msvideo','.ts':'video/mp2t','.m3u8':'application/vnd.apple.mpegurl'};
 
-  node "$NODE_SERVER_JS" > "${HTTP_RUNTIME_DIR}/node_http.log" 2>&1 &
-  HTTP_SERVER_PID=$!
-  echo "$HTTP_SERVER_PID" > "$NODE_PID_FILE"
-  sleep 1
+await fsp.mkdir(downloadRoot, { recursive: true });
 
-  if ! kill -0 "$HTTP_SERVER_PID" 2>/dev/null; then
-    echo -e "\e[1;33m[Node HTTP] 启动失败，日志如下：\e[0m"
-    tail -n 50 "${HTTP_RUNTIME_DIR}/node_http.log" 2>/dev/null || true
-    return 1
-  fi
+function log(...args){ console.log(new Date().toISOString(), ...args); }
+function human(n){ const u=['B','KB','MB','GB','TB']; let x=Number(n||0),i=0; while(x>=1024&&i<u.length-1){x/=1024;i++;} return i?`${x.toFixed(2)} ${u[i]}`:`${x} ${u[i]}`; }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function idFromRel(rel){ return Buffer.from(rel,'utf8').toString('base64url'); }
+function relFromId(id){ try{return Buffer.from(String(id||''),'base64url').toString('utf8');}catch{return '';} }
+function inside(root,target){ const r=path.resolve(root),t=path.resolve(target); return t===r || t.startsWith(r+path.sep); }
+function sendJson(res,code,obj){ const body=JSON.stringify(obj); res.writeHead(code, {'Content-Type':'application/json; charset=utf-8','Content-Length':Buffer.byteLength(body),'Cache-Control':'no-store'}); res.end(body); }
+function sendText(res,code,txt){ res.writeHead(code, {'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'}); res.end(txt); }
+async function readBody(req,limit=8192){ let body=''; for await(const ch of req){ body+=ch; if(body.length>limit) throw new Error('请求体过大'); } return body; }
+function authorized(req){ return !downloadKey || String(req.headers['x-library-key']||'') === downloadKey; }
 
-  HTTP_SERVER_MODE="node"
-  echo -e "\e[1;32m[Node HTTP] 已启动媒体库与下载后端，监听 TCP/HTTP 端口: ${HTTP_LISTEN_PORT}\e[0m"
-  echo -e "\e[1;32m[Node HTTP] 日志: ${HTTP_RUNTIME_DIR}/node_http.log\e[0m"
-  if [ "$ENABLE_MAGNET_DOWNLOADER" = "1" ]; then
-    echo -e "\e[1;32m[下载目录] ${DOWNLOAD_DIR}\e[0m"
-    echo -e "\e[1;32m[并发限制] DOWNLOAD_MAX_ACTIVE=${DOWNLOAD_MAX_ACTIVE}, DOWNLOAD_MAX_QUEUE=${DOWNLOAD_MAX_QUEUE}\e[0m"
-    if [ -n "$DOWNLOAD_KEY" ]; then
-      echo -e "\e[1;32m[访问密钥] 已启用 DOWNLOAD_KEY，网页导入时需要填写\e[0m"
-    else
-      echo -e "\e[1;33m[访问密钥] DOWNLOAD_KEY_MODE=none，公网访问者可提交磁力链接（不建议）\e[0m"
-    fi
-  fi
-  return 0
-}
+function weekKey(ts=Date.now()){ const d=new Date(ts+8*3600_000); const day=d.getUTCDay()||7; d.setUTCDate(d.getUTCDate()-day+1); return d.toISOString().slice(0,10); }
+let visitors = { weekKey: weekKey(), ids: [] };
+let visitorSet = new Set();
+try { const old = JSON.parse(await fsp.readFile(visitorFile,'utf8')); if (old?.weekKey===weekKey() && Array.isArray(old.ids)) visitors=old; } catch {}
+visitorSet = new Set(visitors.ids);
+async function saveVisitors(){ try{ await fsp.writeFile(visitorFile+'.tmp', JSON.stringify(visitors), {mode:0o600}); await fsp.rename(visitorFile+'.tmp', visitorFile); }catch{} }
+function recordVisit(req){ const wk=weekKey(); if(visitors.weekKey!==wk){ visitors={weekKey:wk,ids:[]}; visitorSet=new Set(); } const ip=String(req.headers['x-forwarded-for']||req.socket.remoteAddress||'').split(',')[0].trim(); const ua=String(req.headers['user-agent']||''); const id=crypto.createHash('sha256').update(ip+'|'+ua).digest('hex').slice(0,24); if(!visitorSet.has(id)){ visitorSet.add(id); visitors.ids.push(id); saveVisitors(); } }
 
-start_python_http_server() {
-  if ! command -v python3 >/dev/null 2>&1; then
-    return 1
-  fi
-
-  stop_pid_file "$PYTHON_PID_FILE"
-
-  (cd "$NGINX_WEB_ROOT" && python3 -m http.server "$HTTP_LISTEN_PORT" --bind 0.0.0.0) > "${HTTP_RUNTIME_DIR}/python_http.log" 2>&1 &
-  HTTP_SERVER_PID=$!
-  echo "$HTTP_SERVER_PID" > "$PYTHON_PID_FILE"
-  sleep 1
-
-  if ! kill -0 "$HTTP_SERVER_PID" 2>/dev/null; then
-    echo -e "\e[1;33m[Python HTTP] 启动失败，日志如下：\e[0m"
-    tail -n 30 "${HTTP_RUNTIME_DIR}/python_http.log" 2>/dev/null || true
-    return 1
-  fi
-
-  HTTP_SERVER_MODE="python"
-  echo -e "\e[1;32m[Python HTTP] 已启动免安装伪装站，监听 TCP/HTTP 端口: ${HTTP_LISTEN_PORT}\e[0m"
-  echo -e "\e[1;33m[Python HTTP] 注意：Python fallback 可用，但视频 Range 支持可能不如 Nginx/Node 完整\e[0m"
-  return 0
-}
-
-start_http_masquerade_server() {
-  generate_video_page
-
-  if [ "$ENABLE_MAGNET_DOWNLOADER" = "1" ]; then
-    if start_node_http_server; then
-      return 0
-    fi
-    echo -e "\e[1;31m[HTTP伪装] 启动失败：启用磁力下载需要 Node.js 后端，但 Node 服务无法启动\e[0m"
-    exit 1
-  fi
-
-  if start_nginx_local; then
-    return 0
-  fi
-
-  if start_node_http_server; then
-    return 0
-  fi
-
-  if start_python_http_server; then
-    return 0
-  fi
-
-  echo -e "\e[1;31m[HTTP伪装] 启动失败：无 nginx、无 node、无 python3，无法提供伪装网页\e[0m"
-  exit 1
-}
-
-reload_http_masquerade_server() {
-  generate_video_page
-
-  if [ "$HTTP_SERVER_MODE" = "nginx" ]; then
-    nginx -p "${NGINX_PREFIX}/" -c "${NGINX_PREFIX}/conf/nginx.conf" -s reload >/dev/null 2>&1 || true
-  fi
-}
-
-# ================== 架构检测 & 安装/更新 sing-box ==================
-# 固定使用 ${FILE_PATH}/sing-box。
-# 启动时会先尝试把旧版随机 6 位文件名的 sing-box 迁移成固定文件名，
-# 再清理剩余旧随机二进制，避免 .npm/video 目录持续膨胀。
-export SINGBOX_AUTO_UPDATE=${SINGBOX_AUTO_UPDATE:-"1"}
-export SINGBOX_BIN="${SINGBOX_BIN:-${FILE_PATH}/sing-box}"
-export SINGBOX_VERSION_FILE="${FILE_PATH}/sing-box.version"
-export SINGBOX_TMP_DIR="${FILE_PATH}/.singbox_tmp"
-# 首次安装或更新时需要同时容纳压缩包和解压后的二进制；空间太小时直接给出明确错误。
-export SINGBOX_MIN_FREE_MB=${SINGBOX_MIN_FREE_MB:-"120"}
-
-ARCH=$(uname -m)
-
-case "$ARCH" in
-  x86_64|amd64)
-    SB_ARCH="amd64"
-    ;;
-  aarch64|arm64)
-    SB_ARCH="arm64"
-    ;;
-  armv7l|armv7)
-    SB_ARCH="armv7"
-    ;;
-  armv6l|armv6)
-    SB_ARCH="armv6"
-    ;;
-  s390x)
-    SB_ARCH="s390x"
-    ;;
-  *)
-    echo "不支持的架构: $ARCH"
-    exit 1
-    ;;
-esac
-
-get_singbox_version() {
-  local bin="$1"
-  [ -x "$bin" ] || return 1
-  "$bin" version 2>/dev/null | grep -m1 -Eo '([0-9]+\.){2}[0-9]+([^[:space:]]*)?' || return 1
-}
-
-is_singbox_binary() {
-  local bin="$1"
-  [ -x "$bin" ] || return 1
-  "$bin" version 2>/dev/null | head -n 3 | grep -qi 'sing-box'
-}
-
-free_space_mb() {
-  # 输出目标路径所在文件系统的可用空间，单位 MiB。
-  local target="$1"
-  df -Pm "$target" 2>/dev/null | awk 'NR==2 {print $4}'
-}
-
-print_space_hint() {
-  echo -e "\e[1;33m[空间诊断] 当前目录占用最大的项目：\e[0m"
-  du -sh "${FILE_PATH}"/* "${FILE_PATH}"/.[!.]* 2>/dev/null | sort -hr | head -n 12 || true
-  echo -e "\e[1;33m[空间诊断] 文件系统空间：\e[0m"
-  df -h "$FILE_PATH" 2>/dev/null || true
-  echo -e "\e[1;33m[空间诊断] inode 使用情况：\e[0m"
-  df -ih "$FILE_PATH" 2>/dev/null || true
-}
-
-require_free_space_for_singbox_install() {
-  local available
-  available=$(free_space_mb "$FILE_PATH" || echo "")
-  if [ -n "$available" ] && [ "$available" -lt "$SINGBOX_MIN_FREE_MB" ]; then
-    echo -e "\e[1;31m[sing-box] 可用空间不足：${available}MiB，安装/更新至少建议 ${SINGBOX_MIN_FREE_MB}MiB\e[0m"
-    echo -e "\e[1;31m[sing-box] 为避免再次写爆容器，已停止下载。请先删除旧随机二进制、无用视频或 downloads 里的大文件。\e[0m"
-    print_space_hint
-    exit 1
-  fi
-}
-
-cleanup_failed_singbox_install_leftovers() {
-  # 清理上次失败安装留下的固定临时文件和脚本专用临时目录。
-  rm -f "${SINGBOX_BIN}.new" "${SINGBOX_BIN}.tmp" 2>/dev/null || true
-  rm -rf "$SINGBOX_TMP_DIR" 2>/dev/null || true
-
-  # 旧版本曾用 /tmp/tmp.xxxxxx；如果中途 cp/mv 失败，目录可能残留并持续占空间。
-  # 只删除包含 sing-box release 包或 sing-box.new 的临时目录，避免误删别的程序临时文件。
-  local tmp_base d
-  tmp_base="${TMPDIR:-/tmp}"
-  if [ -d "$tmp_base" ]; then
-    while IFS= read -r -d '' d; do
-      if find "$d" -maxdepth 1 \( -name 'sing-box-*-linux-*.tar.gz' -o -name 'sing-box.new' \) -print -quit 2>/dev/null | grep -q .; then
-        rm -rf "$d" 2>/dev/null || true
-      fi
-    done < <(find "$tmp_base" -maxdepth 1 -type d -name 'tmp.*' -print0 2>/dev/null)
-  fi
-}
-
-find_old_random_singbox_bin() {
-  # 找旧脚本生成的 6 位小写/数字随机名 sing-box 二进制。
-  local f base
-  while IFS= read -r -d '' f; do
-    [ "$f" = "$SINGBOX_BIN" ] && continue
-    base=$(basename "$f")
-    [ "${#base}" -eq 6 ] || continue
-    case "$base" in
-      *[!a-z0-9]*) continue ;;
-    esac
-    if is_singbox_binary "$f"; then
-      printf '%s\n' "$f"
-      return 0
-    fi
-  done < <(find "$FILE_PATH" -maxdepth 1 -type f -print0 2>/dev/null)
-  return 1
-}
-
-promote_old_random_singbox_if_needed() {
-  # 如果固定文件不存在，但目录里还有旧随机 sing-box，直接重命名复用，避免无空间时还去重新下载。
-  local candidate version
-  if [ -x "$SINGBOX_BIN" ] && is_singbox_binary "$SINGBOX_BIN"; then
-    return 0
-  fi
-
-  candidate=$(find_old_random_singbox_bin || true)
-  if [ -n "$candidate" ]; then
-    version=$(get_singbox_version "$candidate" || true)
-    mv -f "$candidate" "$SINGBOX_BIN"
-    chmod +x "$SINGBOX_BIN"
-    [ -n "$version" ] && echo "$version" > "$SINGBOX_VERSION_FILE"
-    echo -e "\e[1;32m[sing-box] 已把旧随机二进制迁移为固定文件: $(basename "$candidate") -> ${SINGBOX_BIN}\e[0m"
-  fi
-}
-
-cleanup_old_random_singbox_bins() {
-  # 清理剩余旧脚本生成的 6 位小写/数字随机名，并且必须能执行出 sing-box version，避免误删视频或用户文件。
-  local f base removed=0
-  while IFS= read -r -d '' f; do
-    [ "$f" = "$SINGBOX_BIN" ] && continue
-    base=$(basename "$f")
-    [ "${#base}" -eq 6 ] || continue
-    case "$base" in
-      *[!a-z0-9]*) continue ;;
-    esac
-    if is_singbox_binary "$f"; then
-      rm -f "$f" && removed=$((removed + 1))
-    fi
-  done < <(find "$FILE_PATH" -maxdepth 1 -type f -print0 2>/dev/null)
-
-  if [ "$removed" -gt 0 ]; then
-    echo -e "\e[1;32m[sing-box] 已清理旧随机二进制文件: ${removed} 个\e[0m"
-  fi
-}
-
-install_singbox_version() {
-  local version="$1"
-  local tarball="sing-box-${version}-linux-${SB_ARCH}.tar.gz"
-  local download_url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${tarball}"
-  local archive_path singbox_src new_bin
-
-  require_free_space_for_singbox_install
-
-  rm -rf "$SINGBOX_TMP_DIR"
-  mkdir -p "$SINGBOX_TMP_DIR"
-  archive_path="${SINGBOX_TMP_DIR}/${tarball}"
-  new_bin="${SINGBOX_BIN}.new"
-
-  # 确保即使下载、解压或移动中途失败，也会清理临时目录，避免下次启动空间更少。
-  cleanup_on_install_fail() {
-    rm -rf "$SINGBOX_TMP_DIR" 2>/dev/null || true
-    rm -f "$new_bin" 2>/dev/null || true
+function parseTrackers(txt){ return [...new Set(String(txt||'').split(/\r?\n/).map(s=>s.trim()).filter(s=>s && !s.startsWith('#')).filter(s=>/^(udp|http|https|ws|wss):\/\//i.test(s)))]; }
+async function loadTrackers(){
+  try {
+    const ac = new AbortController(); const timer=setTimeout(()=>ac.abort(), 8000);
+    const r = await fetch(trackerListUrl, { signal: ac.signal, headers: {'User-Agent':'Mozilla/5.0'} }); clearTimeout(timer);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const list=parseTrackers(await r.text()); if(!list.length) throw new Error('tracker 列表为空');
+    await fsp.writeFile(trackerCacheFile, list.join('\n')+'\n', {mode:0o600}); log('[Tracker] loaded', list.length, 'from', trackerListUrl); return list;
+  } catch(e) {
+    try { const cached=parseTrackers(await fsp.readFile(trackerCacheFile,'utf8')); if(cached.length){ log('[Tracker] using cache', cached.length); return cached; } } catch {}
+    log('[Tracker] load failed:', e?.message || e); return [];
   }
-  trap cleanup_on_install_fail RETURN
+}
 
-  download_file "$download_url" "$archive_path"
-  tar -xzf "$archive_path" -C "$SINGBOX_TMP_DIR"
+let WebTorrent=null, loadErr='';
+try { const mod = await import('webtorrent'); WebTorrent = mod.default || mod.WebTorrent || mod; } catch(e) { loadErr = e?.message || String(e); }
+const announceList = await loadTrackers();
+const client = WebTorrent ? new WebTorrent({ maxConns, tracker: announceList.length ? { announce: announceList } : true }) : null;
+if (!client) log('[WebTorrent] unavailable:', loadErr);
 
-  singbox_src=$(find "$SINGBOX_TMP_DIR" -type f -name "sing-box" | head -n 1)
-  if [ -z "$singbox_src" ]; then
-    echo -e "\e[1;31m未在压缩包中找到 sing-box 二进制文件\e[0m"
+const queued=[], failed=new Map(), addedAt=new Map();
+const bt32='abcdefghijklmnopqrstuvwxyz234567';
+function b32tohex(v){ let bits='',hex=''; for(const ch of String(v).toLowerCase().replace(/=+$/,'')){ const n=bt32.indexOf(ch); if(n<0)return''; bits+=n.toString(2).padStart(5,'0'); } for(let i=0;i+4<=bits.length;i+=4) hex+=parseInt(bits.slice(i,i+4),2).toString(16); return hex; }
+function normId(v){ const s=decodeURIComponent(String(v||'')).trim().toLowerCase(); if(/^[a-f0-9]{40}$/.test(s))return s; if(/^[a-z2-7]{32}$/.test(s)){ const h=b32tohex(s); if(/^[a-f0-9]{40}$/.test(h))return h; } return s; }
+function magnetId(m){ const x=/(?:^|[?&])xt=urn:btih:([^&]+)/i.exec(String(m||'')); return x?.[1] ? normId(x[1]) : crypto.createHash('sha1').update(String(m||'')).digest('hex'); }
+function liveTorrents(){ return client ? client.torrents.filter(t=>t && !t.destroyed && !t.done) : []; }
+function allTorrents(){ return client ? client.torrents.filter(t=>t && !t.destroyed) : []; }
+function findTorrent(id){ return allTorrents().find(t=>normId(t.infoHash||'')===id); }
+function torrentView(t){ const id=normId(t.infoHash||''); return { id, infoHash:id, name:t.name||`下载任务 ${id.slice(0,8)}`, state:t.done?'done':'downloading', progress:Number.isFinite(t.progress)?Math.round(t.progress*1000)/10:0, downloadedText:human(t.downloaded||0), lengthText:t.length?human(t.length):'获取元数据中', downloadSpeedText:human(t.downloadSpeed||0)+'/s', peers:t.numPeers||0, addedAt:addedAt.get(id)||Date.now(), error:'' }; }
+function queuedView(q){ return { id:q.id, infoHash:q.id, name:q.name||`排队任务 ${q.id.slice(0,8)}`, state:'queued', progress:0, downloadedText:'0 B', lengthText:'等待中', downloadSpeedText:'排队中', peers:0, addedAt:q.addedAt, error:'' }; }
+function failedView([id,e]){ return { id, infoHash:id, name:`失败任务 ${id.slice(0,8)}`, state:'failed', progress:0, downloadedText:'0 B', lengthText:'—', downloadSpeedText:'—', peers:0, addedAt:e.addedAt, error:e.error }; }
+function activeCount(){ return liveTorrents().length; }
+function startQueue(){ if(!client)return; while(activeCount()<maxActive && queued.length){ const q=queued.shift(); startMagnet(q.magnet, q.id, q.addedAt); } }
+function attach(t,id,at){ const remember=()=>{ const h=normId(t.infoHash||id); addedAt.set(h, addedAt.get(id)||at); if(id!==h) addedAt.delete(id); }; t.once('metadata', remember); t.once('ready', remember); t.once('done', ()=>{ remember(); const h=normId(t.infoHash||id); addedAt.delete(h); try{ client.remove(t, {destroyStore:false}, ()=>{}); }catch{} startQueue(); }); t.once('error', e=>{ const h=normId(t.infoHash||id); failed.set(h,{error:e?.message||String(e),addedAt:Date.now()}); try{ client.remove(t,{destroyStore:false},()=>{}); }catch{} startQueue(); }); }
+function startMagnet(magnet,id,at){ const t=client.add(magnet, { path:downloadRoot, announce: announceList }); addedAt.set(normId(t.infoHash||id), at); attach(t,id,at); return t; }
+
+function activeVideoRels(){ const s=new Set(); for(const t of liveTorrents()){ for(const f of t.files||[]){ const full=path.resolve(downloadRoot, f.path||f.name||''); if(inside(fileRoot,full)&&videoExts.has(path.extname(full).toLowerCase())) s.add(path.relative(fileRoot,full).split(path.sep).join('/')); } } return s; }
+async function walk(dir=fileRoot,depth=0,blocked=activeVideoRels()){ if(depth>6)return[]; let ents=[]; try{ents=await fsp.readdir(dir,{withFileTypes:true});}catch{return[];} const out=[]; for(const ent of ents){ if(ent.name.startsWith('.')&&ent.name!=='.npm')continue; if(skipDirs.has(ent.name))continue; const full=path.join(dir,ent.name); if(!inside(fileRoot,full))continue; if(ent.isDirectory()) out.push(...await walk(full,depth+1,blocked)); else if(ent.isFile()&&videoExts.has(path.extname(ent.name).toLowerCase())){ const st=await fsp.stat(full); const rel=path.relative(fileRoot,full).split(path.sep).join('/'); if(blocked.has(rel))continue; const ext=path.extname(ent.name).toLowerCase(); const id=idFromRel(rel); out.push({id,name:ent.name,rel,size:st.size,sizeText:human(st.size),mtime:st.mtime.toISOString().slice(0,16).replace('T',' '),type:mime[ext]||'application/octet-stream',url:'/media/'+id,thumbUrl:'/thumb/'+id}); } } return out.sort((a,b)=>a.name.localeCompare(b.name,'zh-CN',{numeric:true})); }
+async function dirBytes(dir=fileRoot,depth=0){ if(depth>8)return 0; let ents=[]; try{ents=await fsp.readdir(dir,{withFileTypes:true});}catch{return 0;} let total=0; for(const ent of ents){ if(skipDirs.has(ent.name))continue; const full=path.join(dir,ent.name); if(!inside(fileRoot,full))continue; try{ const st=await fsp.stat(full); total += ent.isDirectory()? await dirBytes(full,depth+1) : st.size; }catch{} } return total; }
+async function space(){ let total=0,free=0,avail=0,used=0; try{ const s=await fsp.statfs(fileRoot); const b=Number(s.bsize||0); total=Number(s.blocks||0)*b; free=Number(s.bfree||0)*b; avail=Number(s.bavail||0)*b; used=Math.max(0,total-free); }catch{} const lib=await dirBytes(); return {totalText:total?human(total):'—',availableText:avail?human(avail):'—',usedText:total?human(used):human(lib),libraryText:human(lib),usedPct:total?Math.round(used/total*1000)/10:0}; }
+function thumb(name){ const h=crypto.createHash('md5').update(name).digest()[0]*360/255|0; return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="hsl(${h} 45% 20%)"/><circle cx="320" cy="180" r="58" fill="#0008"/><path d="M304 142v76l60-38z" fill="#fff"/></svg>`; }
+
+async function status(){ return { ok:true, downloadEnabled:!!client, downloadAuthRequired:!!downloadKey, downloadError:client?'':loadErr, maxActive, maxQueued, trackers:announceList.length, visitors:{weekKey:visitors.weekKey,weeklyVisitors:visitorSet.size}, files:await walk(), space:await space(), torrents:[...liveTorrents().map(torrentView),...queued.map(queuedView),...failed.entries()].map(x=>Array.isArray(x)?failedView(x):x).sort((a,b)=>b.addedAt-a.addedAt) }; }
+
+async function addMagnet(req,res){ if(!client)return sendJson(res,503,{ok:false,error:'下载器不可用：'+loadErr}); if(!authorized(req))return sendJson(res,401,{ok:false,error:'访问密钥错误'}); let d; try{d=JSON.parse(await readBody(req));}catch{return sendJson(res,400,{ok:false,error:'请求格式无效'});} const magnet=String(d.magnet||'').trim(); if(!magnet.startsWith('magnet:?')||!/xt=urn:btih:/i.test(magnet))return sendJson(res,400,{ok:false,error:'请输入有效磁力链接'}); const id=magnetId(magnet); const existing=findTorrent(id); if(existing)return sendJson(res,202,{ok:true,torrent:torrentView(existing)}); if(queued.find(q=>q.id===id))return sendJson(res,202,{ok:true,torrent:queuedView(queued.find(q=>q.id===id))}); failed.delete(id); const at=Date.now(); if(activeCount()<maxActive){ try{return sendJson(res,202,{ok:true,torrent:torrentView(startMagnet(magnet,id,at))});}catch(e){failed.set(id,{error:e?.message||String(e),addedAt:at});return sendJson(res,500,{ok:false,error:e?.message||String(e)});} } if(queued.length>=maxQueued)return sendJson(res,429,{ok:false,error:`队列已满：最多 ${maxQueued} 个等待任务`}); const q={id,magnet,addedAt:at,name:`排队任务 ${id.slice(0,8)}`}; queued.push(q); return sendJson(res,202,{ok:true,torrent:queuedView(q)}); }
+async function delTask(req,res,id){ if(!authorized(req))return sendJson(res,401,{ok:false,error:'访问密钥错误'}); const qi=queued.findIndex(q=>q.id===id); if(qi>=0){queued.splice(qi,1);return sendJson(res,200,{ok:true});} if(failed.delete(id))return sendJson(res,200,{ok:true}); const t=findTorrent(id); if(!t)return sendJson(res,404,{ok:false,error:'未找到任务'}); try{ client.remove(t,{destroyStore:false},()=>{startQueue();}); return sendJson(res,200,{ok:true}); }catch(e){return sendJson(res,500,{ok:false,error:e?.message||String(e)});} }
+async function delFile(req,res,id){ if(!authorized(req))return sendJson(res,401,{ok:false,error:'访问密钥错误'}); const rel=relFromId(id); const full=path.resolve(fileRoot,rel); if(!rel||rel.includes('\0')||!inside(fileRoot,full)||!videoExts.has(path.extname(full).toLowerCase()))return sendJson(res,403,{ok:false,error:'拒绝删除该文件'}); if(activeVideoRels().has(rel))return sendJson(res,409,{ok:false,error:'文件仍在下载中'}); try{ const st=await fsp.stat(full); if(!st.isFile())throw new Error('不是文件'); await fsp.unlink(full); return sendJson(res,200,{ok:true}); }catch(e){return sendJson(res,500,{ok:false,error:e?.message||String(e)});} }
+
+function page(){ return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>月光放映室</title><style>:root{color-scheme:dark;--b:#111318;--p:#181b22;--p2:#20252f;--l:#303744;--t:#f3f5f8;--m:#aab2bd;--a:#d8aa4a;--r:#ff8f8f}*{box-sizing:border-box}body{margin:0;background:var(--b);color:var(--t);font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}.w{width:min(1160px,calc(100% - 28px));margin:auto;padding:24px 0}header{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}h1{font-size:24px;margin:0}.s{color:var(--m);font-size:13px}.box{background:var(--p);border:1px solid var(--l);border-radius:10px;padding:14px;margin-bottom:14px}.form{display:grid;grid-template-columns:1fr auto;gap:10px}.in,.btn{height:40px;border-radius:7px;font:inherit}.in{border:1px solid var(--l);background:#0f1218;color:var(--t);padding:0 12px}.btn{border:0;background:var(--a);color:#18120a;font-weight:700;padding:0 14px;cursor:pointer}.btn2{border:1px solid var(--l);background:var(--p2);color:var(--t);height:32px;border-radius:6px;cursor:pointer}.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:12px}.st{background:var(--p2);border:1px solid var(--l);border-radius:8px;padding:9px}.st span{display:block;color:var(--m);font-size:12px}.bar{height:7px;background:#333b49;border-radius:9px;overflow:hidden;margin-top:8px}.fill{height:100%;background:var(--a);width:0}.lay{display:grid;grid-template-columns:1fr 340px;gap:14px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.card,.task,.empty{background:var(--p);border:1px solid var(--l);border-radius:10px}.card{overflow:hidden}.task,.empty{padding:12px;margin-bottom:10px;color:var(--m)}video{width:100%;aspect-ratio:16/9;background:#05070b;display:block}.meta{padding:10px}.title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row{display:flex;gap:8px;align-items:center;justify-content:space-between}.msg{min-height:20px;color:var(--m);font-size:13px;margin-top:8px}.bad{color:var(--r)}@media(max-width:850px){.lay,.form,.stats{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}</style></head><body><main class="w"><header><h1>月光放映室</h1><div class="s">本周访客 <b id="vis">—</b></div></header><section class="box"><div class="form"><input id="mag" class="in" placeholder="粘贴 magnet 磁力链接"><button id="add" class="btn">开始下载</button></div><div style="margin-top:10px"><input id="key" class="in" placeholder="访问密钥：下载、移除任务、删除影片时需要" style="width:100%"></div><div class="stats"><div class="st"><span>已用空间</span><b id="used">—</b><div class="bar"><div class="fill" id="sp"></div></div></div><div class="st"><span>可用空间</span><b id="free">—</b></div><div class="st"><span>片库占用</span><b id="lib">—</b></div><div class="st"><span>任务限制</span><b id="lim">—</b></div><div class="st"><span>Tracker</span><b id="trk">—</b></div></div><div id="msg" class="msg"></div></section><section class="lay"><section><h2>影片</h2><div id="grid" class="grid"></div></section><aside><h2>任务</h2><div id="tasks"></div></aside></section></main><script>const $=s=>document.querySelector(s);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function msg(t,b=false){$('#msg').textContent=t||'';$('#msg').className='msg '+(b?'bad':'')}function headers(){const h={};const k=$('#key').value.trim();if(k)h['X-Library-Key']=k;return h}function fhtml(f){return '<article class="card"><video preload="metadata" poster="'+esc(f.thumbUrl)+'" controls><source src="'+esc(f.url)+'" type="'+esc(f.type)+'"></video><div class="meta"><div class="title">'+esc(f.name)+'</div><div class="s">'+esc(f.sizeText)+' · '+esc(f.mtime)+'</div><div class="row"><button class="btn2" data-play="'+esc(f.id)+'">播放</button><button class="btn2" data-del-file="'+esc(f.id)+'">删除</button></div></div></article>'}function thtml(t){return '<div class="task"><div class="row"><b>'+esc(t.name)+'</b><button class="btn2" data-del-task="'+esc(t.id)+'">移除</button></div><div>'+esc(t.state)+' · '+esc(t.downloadedText)+' / '+esc(t.lengthText)+' · '+esc(t.downloadSpeedText)+' · '+esc(t.peers)+' 连接</div>'+(t.error?'<div class="bad">'+esc(t.error)+'</div>':'')+'<div class="bar"><div class="fill" style="width:'+Math.max(0,Math.min(100,t.progress))+'%"></div></div></div>'}async function refresh(){const d=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());$('#used').textContent=d.space.usedText+' / '+d.space.totalText;$('#free').textContent=d.space.availableText;$('#lib').textContent=d.space.libraryText;$('#lim').textContent=d.maxActive+' 下载 / '+d.maxQueued+' 排队';$('#trk').textContent=d.trackers;$('#vis').textContent=d.visitors.weeklyVisitors;$('#sp').style.width=Math.max(0,Math.min(100,d.space.usedPct||0))+'%';$('#grid').innerHTML=d.files.length?d.files.map(fhtml).join(''):'<div class="empty">暂无影片。</div>';$('#tasks').innerHTML=d.torrents.length?d.torrents.map(thtml).join(''):'<div class="empty">暂无任务。</div>';if(!d.downloadEnabled)msg('下载器不可用：'+d.downloadError,true)}$('#add').onclick=async()=>{const magnet=$('#mag').value.trim();if(!magnet)return msg('请粘贴磁力链接',true);msg('正在创建任务...');const r=await fetch('/api/downloads',{method:'POST',headers:{'Content-Type':'application/json',...headers()},body:JSON.stringify({magnet})});const d=await r.json().catch(()=>({ok:false,error:'请求失败'}));if(!d.ok)return msg(d.error||'创建失败',true);$('#mag').value='';msg('任务已创建');refresh()};document.body.onclick=async e=>{const fd=e.target.dataset.delFile,td=e.target.dataset.delTask,pl=e.target.dataset.play;if(fd){if(!confirm('确认删除这个影片文件？'))return;const d=await fetch('/api/files/'+encodeURIComponent(fd),{method:'DELETE',headers:headers()}).then(r=>r.json());if(!d.ok)msg(d.error,true);refresh()}if(td){const d=await fetch('/api/downloads/'+encodeURIComponent(td),{method:'DELETE',headers:headers()}).then(r=>r.json());if(!d.ok)msg(d.error,true);refresh()}if(pl){const v=e.target.closest('.card')?.querySelector('video');v&&v.play().catch(()=>msg('浏览器无法播放该格式',true))}};refresh();setInterval(refresh,5000)</script></body></html>`; }
+function serveThumb(req,res,id){ const rel=relFromId(id), full=path.resolve(fileRoot,rel); if(!inside(fileRoot,full)||!videoExts.has(path.extname(full).toLowerCase()))return sendText(res,403,'Forbidden'); fs.stat(full,(e,st)=>{ if(e||!st.isFile())return sendText(res,404,'Not Found'); const body=thumb(path.basename(full)); res.writeHead(200,{'Content-Type':'image/svg+xml; charset=utf-8','Content-Length':Buffer.byteLength(body),'Cache-Control':'public,max-age=3600'}); if(req.method==='HEAD')return res.end(); res.end(body); }); }
+function serveMedia(req,res,id){ const rel=relFromId(id), full=path.resolve(fileRoot,rel); if(!inside(fileRoot,full))return sendText(res,403,'Forbidden'); fs.stat(full,(e,st)=>{ if(e||!st.isFile())return sendText(res,404,'Not Found'); const type=mime[path.extname(full).toLowerCase()]||'application/octet-stream', total=st.size, range=req.headers.range, head=req.method==='HEAD'; const common={'Content-Type':type,'Accept-Ranges':'bytes','X-Content-Type-Options':'nosniff'}; if(range){ const m=/^bytes=(\d*)-(\d*)$/.exec(range); if(!m){res.writeHead(416,{...common,'Content-Range':`bytes */${total}`});return res.end()} let start,end; if(m[1]===''){const suf=Number(m[2]);start=Math.max(total-suf,0);end=total-1}else{start=Number(m[1]);end=m[2]===''?total-1:Number(m[2])} if(!Number.isFinite(start)||!Number.isFinite(end)||start>end||start>=total){res.writeHead(416,{...common,'Content-Range':`bytes */${total}`});return res.end()} end=Math.min(end,total-1); res.writeHead(206,{...common,'Content-Range':`bytes ${start}-${end}/${total}`,'Content-Length':end-start+1}); if(head)return res.end(); return fs.createReadStream(full,{start,end}).pipe(res); } res.writeHead(200,{...common,'Content-Length':total}); if(head)return res.end(); fs.createReadStream(full).pipe(res); }); }
+
+const server=http.createServer(async(req,res)=>{ let p='/'; try{p=new URL(req.url,'http://127.0.0.1').pathname}catch{return sendText(res,400,'Bad Request')} try{ if(req.method==='GET'&&(p==='/'||p==='/index.html')){recordVisit(req);const html=page();res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Content-Length':Buffer.byteLength(html),'Cache-Control':'no-cache'});return res.end(html)} if(req.method==='GET'&&p==='/api/status')return sendJson(res,200,await status()); if(req.method==='POST'&&p==='/api/downloads')return addMagnet(req,res); if(req.method==='DELETE'&&p.startsWith('/api/downloads/'))return delTask(req,res,decodeURIComponent(p.slice('/api/downloads/'.length))); if(req.method==='DELETE'&&p.startsWith('/api/files/'))return delFile(req,res,decodeURIComponent(p.slice('/api/files/'.length))); if((req.method==='GET'||req.method==='HEAD')&&p.startsWith('/thumb/'))return serveThumb(req,res,decodeURIComponent(p.slice('/thumb/'.length))); if((req.method==='GET'||req.method==='HEAD')&&p.startsWith('/media/'))return serveMedia(req,res,decodeURIComponent(p.slice('/media/'.length))); return sendText(res,404,'Not Found'); }catch(e){ console.error(e); return sendJson(res,500,{ok:false,error:e?.message||String(e)}); }});
+server.on('error',e=>{ console.error('[HTTP server error]',e); process.exit(1); });
+server.listen(port,'::',()=>log('[HTTP] listening on',port,'root=',fileRoot,'download=',downloadRoot,'auth=',!!downloadKey));
+EOF_NODE
+  log "INFO" "Node 服务端已写入：$NODE_SERVER_JS"
+  node --check "$NODE_SERVER_JS" >/dev/null
+  log "INFO" "Node 服务端语法检查通过"
+}
+
+start_node_server() {
+  section "启动 Node HTTP 后端"
+  if [ -f "$NODE_PID_FILE" ]; then
+    local old
+    old="$(cat "$NODE_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$old" ]; then kill "$old" 2>/dev/null || true; fi
+    rm -f "$NODE_PID_FILE"
+  fi
+  : > "$NODE_LOG"
+  node "$NODE_SERVER_JS" > "$NODE_LOG" 2>&1 &
+  HTTP_PID=$!
+  export HTTP_PID
+  printf '%s\n' "$HTTP_PID" > "$NODE_PID_FILE"
+  sleep 2
+  if ! kill -0 "$HTTP_PID" 2>/dev/null; then
+    log "ERROR" "Node HTTP 后端启动失败"
+    tail -n 120 "$NODE_LOG" 2>/dev/null || true
     exit 1
   fi
-
-  # 不再在 /tmp 内 cp 出第二份 sing-box.new；直接移动到最终目录旁边，再原子替换。
-  mv -f "$singbox_src" "$new_bin"
-  chmod +x "$new_bin"
-
-  mv -f "$new_bin" "$SINGBOX_BIN"
-  chmod +x "$SINGBOX_BIN"
-  echo "$version" > "$SINGBOX_VERSION_FILE"
-  rm -rf "$SINGBOX_TMP_DIR"
-  trap - RETURN
-
-  echo -e "\e[1;32m[sing-box] 已安装/更新到固定路径: $SINGBOX_BIN\e[0m"
+  log "INFO" "Node HTTP 后端已启动：pid=$HTTP_PID port=$HTTP_LISTEN_PORT log=$NODE_LOG"
+  tail -n 20 "$NODE_LOG" 2>/dev/null || true
 }
 
-ensure_singbox() {
-  local current_version latest_json latest_version path_singbox
-
-  cleanup_failed_singbox_install_leftovers
-  promote_old_random_singbox_if_needed
-  cleanup_old_random_singbox_bins
-
-  current_version=$(get_singbox_version "$SINGBOX_BIN" || true)
-  if [ -n "$current_version" ]; then
-    echo -e "\e[1;32m[sing-box] 检测到已安装版本: v${current_version}\e[0m"
-  else
-    # 如果系统 PATH 里已经有 sing-box，也允许复用，避免小容器里重复下载。
-    path_singbox=$(command -v sing-box 2>/dev/null || true)
-    if [ -n "$path_singbox" ] && is_singbox_binary "$path_singbox"; then
-      export SINGBOX_BIN="$path_singbox"
-      current_version=$(get_singbox_version "$SINGBOX_BIN" || true)
-      echo -e "\e[1;32m[sing-box] 复用系统 PATH 中的 sing-box: ${SINGBOX_BIN} v${current_version}\e[0m"
-    else
-      echo -e "\e[1;33m[sing-box] 未检测到可用的固定安装文件: $SINGBOX_BIN\e[0m"
-    fi
-  fi
-
-  if [ "$SINGBOX_AUTO_UPDATE" != "1" ] && [ -n "$current_version" ]; then
-    echo -e "\e[1;33m[sing-box] SINGBOX_AUTO_UPDATE=0，跳过联网检查并复用当前版本\e[0m"
-    return 0
-  fi
-
-  latest_json=$(fetch_text "https://api.github.com/repos/SagerNet/sing-box/releases/latest")
-  latest_version=$(echo "$latest_json" | grep -m1 '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
-
-  if [ -z "$latest_version" ]; then
-    if [ -n "$current_version" ]; then
-      echo -e "\e[1;33m[sing-box] 无法解析 GitHub 最新版本，复用当前版本: v${current_version}\e[0m"
-      return 0
-    fi
-    echo -e "\e[1;31m无法解析 sing-box 最新版本号，且本地没有可用 sing-box\e[0m"
+# -------------------------- sing-box 启动与定时重启 --------------------------
+SINGBOX_PID=""
+start_singbox() {
+  section "启动 sing-box / HY2"
+  "$SINGBOX_BIN" run -c "$FILE_PATH/config.json" &
+  SINGBOX_PID=$!
+  export SINGBOX_PID
+  sleep 1
+  if ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
+    log "ERROR" "sing-box 启动失败"
     exit 1
   fi
-
-  echo -e "\e[1;32m[sing-box] GitHub latest release: v${latest_version}\e[0m"
-
-  if [ "$current_version" = "$latest_version" ]; then
-    echo -e "\e[1;32m[sing-box] 当前已是最新版本，跳过下载\e[0m"
-    echo "$current_version" > "$SINGBOX_VERSION_FILE"
-    return 0
-  fi
-
-  if [ -n "$current_version" ]; then
-    echo -e "\e[1;33m[sing-box] 发现新版本：v${current_version} -> v${latest_version}，开始更新\e[0m"
-  else
-    echo -e "\e[1;33m[sing-box] 开始首次安装 v${latest_version}\e[0m"
-  fi
-
-  install_singbox_version "$latest_version"
-  cleanup_old_random_singbox_bins
+  log "INFO" "sing-box 已启动：pid=$SINGBOX_PID udp_port=$HY2_PORT"
 }
 
-ensure_singbox
-
-# ================== 生成证书（HY2）==================
-if ! command -v openssl >/dev/null 2>&1; then
-  cat > "${FILE_PATH}/private.key" <<'EOF_KEY'
------BEGIN EC PARAMETERS-----
-BgqghkjOPQQBw==
------END EC PARAMETERS-----
------BEGIN EC PRIVATE KEY-----
-MHcCAQEEIM4792SEtPqIt1ywqTd/0bYidBqpYV/+siNnfBYsdUYsAoGCCqGSM49
-AwEHoUQDQgAE1kHafPj07rJG+HboH2ekAI4r+e6TL38GWASAnngZreoQDF16ARa
-/TsyLyFoPkhTxSbehH/OBEjHtSZGaDhMqQ==
------END EC PRIVATE KEY-----
-EOF_KEY
-
-  cat > "${FILE_PATH}/cert.pem" <<'EOF_CERT'
------BEGIN CERTIFICATE-----
-MIIBezCCASCgAwIBAgIUfDCP0kxSK7zlw4GQXq7mkZKFCk8wCgYIKoZIzj0EAwIw
-HjEcMBoGA1UEAwwTaXJvaGEuY2xvdWR5dW4ucXp6LmlvMB4XDTI1MDEwMTAxMDEw
-MFoXDTM1MDEwMTAxMDEwMFowHjEcMBoGA1UEAwwTaXJvaGEuY2xvdWR5dW4ucXp6
-LmlvMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1kHafPj07rJG+HboH2ekAI4r
-+e6TL38GWASAnngZreoQDF16ARa/TsyLyFoPkhTxSbehH/OBEjHtSZGaDhMqKNTMFEw
-HQYDVR0OBBYEFNXVwUgPtQhITs8tMFEF8ZuCucw3MB8GA1UdIwQYMBaAFNXVwUgP
-tQhITs8tMFEF8ZuCucw3MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAw
-RQIhAMW9QFqG4Z8RvhN8l6YQKu0eIF46w7ryNExS6r4UiZ+JAiBy7PpsP1aURJEU
-eUHkOFzmF8WjZSAZSkErCKPNzhS7Pg==
------END CERTIFICATE-----
-EOF_CERT
-else
-  openssl ecparam -genkey -name prime256v1 -out "${FILE_PATH}/private.key" 2>/dev/null
-  openssl req -new -x509 -days 3650 \
-    -key "${FILE_PATH}/private.key" \
-    -out "${FILE_PATH}/cert.pem" \
-    -subj "/CN=${HY2_SNI}" 2>/dev/null
-fi
-
-chmod 600 "${FILE_PATH}/private.key"
-
-# ================== 启动/刷新 TCP/HTTP 伪装站 ==================
-start_http_masquerade_server
-
-# ================== 生成 sing-box config.json ==================
-INBOUNDS=""
-
-if [ "$HY2_PORT" != "" ] && [ "$HY2_PORT" != "0" ]; then
-  INBOUNDS="${INBOUNDS}
-    {
-      \"type\": \"hysteria2\",
-      \"tag\": \"hy2-in\",
-      \"listen\": \"::\",
-      \"listen_port\": ${HY2_PORT},
-      \"users\": [
-        {
-          \"password\": \"${UUID}\"
-        }
-      ],
-      \"masquerade\": \"http://127.0.0.1:${HTTP_LISTEN_PORT}\",
-      \"tls\": {
-        \"enabled\": true,
-        \"server_name\": \"${HY2_SNI}\",
-        \"alpn\": [\"h3\"],
-        \"certificate_path\": \"${FILE_PATH}/cert.pem\",
-        \"key_path\": \"${FILE_PATH}/private.key\"
-      }
-    }"
-fi
-
-cat > "${FILE_PATH}/config.json" <<EOF_CONFIG
-{
-  "log": {
-    "disabled": true
-  },
-  "inbounds": [
-${INBOUNDS}
-  ],
-  "outbounds": [
-    {
-      "type": "direct"
-    }
-  ]
-}
-EOF_CONFIG
-
-# ================== 启动 sing-box ==================
-"$SINGBOX_BIN" run -c "${FILE_PATH}/config.json" &
-SINGBOX_PID=$!
-echo "[SING-BOX] 启动完成 PID=$SINGBOX_PID"
-
-# ================== 获取 IP & ISP ==================
-refresh_meta() {
-  IP=$(fetch_quiet "https://ipv4.ip.sb" || fetch_quiet "https://api.ipify.org" || echo "IP_ERROR")
-  ISP=$(fetch_quiet "https://speed.cloudflare.com/meta" | awk -F'"' '{print $26"-"$18}' || echo "0.0")
+print_info() {
+  section "连接信息"
+  local ip="IP_UNKNOWN"
+  ip="$(fetch_text 'https://ipv4.ip.sb' 2>/dev/null || fetch_text 'https://api.ipify.org' 2>/dev/null || echo IP_UNKNOWN)"
+  printf '\n================== 连接信息 ==================\n'
+  printf '服务器 IP: %s\n' "$ip"
+  printf 'HY2 端口: %s/udp\n' "$HY2_PORT"
+  printf 'HY2 密码: %s\n' "$UUID"
+  printf 'TLS SNI: %s\n' "$HY2_SNI"
+  printf '允许不安全证书: true\n'
+  printf 'ALPN: h3\n'
+  printf 'HTTP 站点: http://%s:%s/\n' "$ip" "$HTTP_LISTEN_PORT"
+  printf '访问密钥: %s\n' "${DOWNLOAD_KEY:-未启用}"
+  printf 'Tracker 列表: %s\n' "$TRACKER_LIST_URL"
+  printf '==============================================\n\n'
 }
 
-print_connection_info() {
-  refresh_meta
-
-  echo
-  echo -e "\e[1;36m================== 连接信息 ==================\e[0m"
-  echo -e "\e[1;32m服务器 IP:\e[0m ${IP}"
-  echo -e "\e[1;32mISP:\e[0m ${ISP}"
-
-  if [ "$HY2_PORT" != "" ] && [ "$HY2_PORT" != "0" ]; then
-    echo
-    echo -e "\e[1;35m[Hysteria2 / UDP]\e[0m"
-    echo -e "端口: ${HY2_PORT}"
-    echo -e "连接密码: ${UUID}"
-    echo -e "TLS SNI: ${HY2_SNI}"
-    echo -e "允许不安全证书: true"
-    echo -e "ALPN: h3"
-    echo -e "伪装类型: proxy"
-    echo -e "伪装目标: http://127.0.0.1:${HTTP_LISTEN_PORT}"
-    echo
-    echo -e "\e[1;35m[HTTP 伪装站 / TCP]\e[0m"
-    echo -e "后端模式: ${HTTP_SERVER_MODE}"
-    echo -e "端口: ${HTTP_LISTEN_PORT}"
-    echo -e "访问地址: http://${IP}:${HTTP_LISTEN_PORT}/"
-    echo -e "视频目录: ${FILE_PATH}"
-    echo -e "页面目录: ${NGINX_WEB_ROOT}"
-    if [ "$ENABLE_MAGNET_DOWNLOADER" = "1" ]; then
-      echo -e "下载功能: enabled"
-      echo -e "下载目录: ${DOWNLOAD_DIR}"
-      echo -e "并发限制: ${DOWNLOAD_MAX_ACTIVE}"
-      echo -e "排队限制: ${DOWNLOAD_MAX_QUEUE}"
-      if [ -n "$DOWNLOAD_KEY" ]; then
-        echo -e "下载密钥: 已启用"
-      else
-        echo -e "下载密钥: 未启用（DOWNLOAD_KEY_MODE=none，公网不建议）"
-      fi
-    fi
-  fi
-
-  echo -e "\e[1;36m==============================================\e[0m"
-  echo
+cleanup_on_exit() {
+  local rc="$?"
+  log "INFO" "收到退出信号或脚本退出：rc=$rc"
+  if [ -n "${SINGBOX_PID:-}" ]; then kill "$SINGBOX_PID" 2>/dev/null || true; fi
+  if [ -n "${HTTP_PID:-}" ]; then kill "$HTTP_PID" 2>/dev/null || true; fi
 }
+trap cleanup_on_exit EXIT INT TERM
 
-print_connection_info
-
-cleanup() {
-  kill "$SINGBOX_PID" 2>/dev/null || true
-  if [ "$HTTP_SERVER_MODE" = "node" ]; then
-    stop_pid_file "$NODE_PID_FILE"
-  elif [ "$HTTP_SERVER_MODE" = "python" ]; then
-    stop_pid_file "$PYTHON_PID_FILE"
-  fi
-}
-trap cleanup EXIT INT TERM
-
-# ================== 启动定时重启（前台阻塞） ==================
-schedule_restart() {
-  echo "[定时重启:Sing-box] 已启动（北京时间 04:00）"
-  LAST_RESTART_DAY=-1
-
+schedule_restart_loop() {
+  section "进入前台守护循环"
+  log "INFO" "每日北京时间 04:00 重启 sing-box；HTTP 后端持续运行"
+  local last_day=-1
   while true; do
-    now_ts=$(date +%s)
-    beijing_ts=$((now_ts + 28800))
-    H=$(( (beijing_ts / 3600) % 24 ))
-    M=$(( (beijing_ts / 60) % 60 ))
-    D=$(( beijing_ts / 86400 ))
-
-    # ---- 时间匹配 → 重启 sing-box，并刷新视频页面 ----
-    if [ "$H" -eq 4 ] && [ "$M" -eq 0 ] && [ "$D" -ne "$LAST_RESTART_DAY" ]; then
-      echo "[定时重启:Sing-box] 到达 04:00 → 重启 sing-box 并刷新 HTTP 视频页"
-      LAST_RESTART_DAY=$D
-
-      reload_http_masquerade_server
-
-      kill "$SINGBOX_PID" 2>/dev/null || true
-      sleep 3
-
-      "$SINGBOX_BIN" run -c "${FILE_PATH}/config.json" &
-      SINGBOX_PID=$!
-
-      echo "[Sing-box重启完成] 新 PID: $SINGBOX_PID"
-      print_connection_info
+    if [ -n "${HTTP_PID:-}" ] && ! kill -0 "$HTTP_PID" 2>/dev/null; then
+      log "ERROR" "Node HTTP 后端已退出，打印日志后退出主脚本"
+      tail -n 120 "$NODE_LOG" 2>/dev/null || true
+      exit 1
+    fi
+    if [ -n "${SINGBOX_PID:-}" ] && ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
+      log "ERROR" "sing-box 已退出，主脚本退出以便面板重启"
+      exit 1
     fi
 
-    sleep 1
+    local now bj h m d
+    now="$(date +%s)"
+    bj=$((now + 28800))
+    h=$(((bj / 3600) % 24))
+    m=$(((bj / 60) % 60))
+    d=$((bj / 86400))
+    if [ "$h" -eq 4 ] && [ "$m" -eq 0 ] && [ "$d" -ne "$last_day" ]; then
+      last_day="$d"
+      log "INFO" "到达北京时间 04:00，重启 sing-box"
+      kill "$SINGBOX_PID" 2>/dev/null || true
+      sleep 2
+      start_singbox
+    fi
+    sleep 5
   done
 }
 
-# ★★★ 关键：保持脚本前台运行，不能退出
-schedule_restart
+main() {
+  section "启动脚本"
+  log "INFO" "版本：diag-slim-2026-05-04"
+  log "INFO" "HY2_PORT=$HY2_PORT HTTP_LISTEN_PORT=$HTTP_LISTEN_PORT HY2_SNI=$HY2_SNI"
+  log "INFO" "日志文件：$STARTUP_LOG"
+  setup_keys
+  install_singbox
+  setup_cert_and_config
+  ensure_webtorrent
+  write_node_server
+  start_node_server
+  start_singbox
+  print_info
+  schedule_restart_loop
+}
+
+main "$@"
