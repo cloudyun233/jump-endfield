@@ -83,6 +83,23 @@ setup_uuid() {
   export UUID
 }
 
+setup_download_key() {
+  section "初始化 Web 操作密钥"
+  local key_file="$FILE_PATH/download_key.txt"
+  if [[ -n "${DOWNLOAD_KEY:-}" ]]; then
+    log "INFO" "[Web] 复用环境变量 DOWNLOAD_KEY：$DOWNLOAD_KEY"
+  elif [ -f "$key_file" ]; then
+    DOWNLOAD_KEY="$(cat "$key_file")"
+    log "INFO" "[Web] 复用固定操作密钥：$DOWNLOAD_KEY"
+  else
+    DOWNLOAD_KEY="$(cat /proc/sys/kernel/random/uuid)"
+    printf '%s\n' "$DOWNLOAD_KEY" > "$key_file"
+    chmod 600 "$key_file" || true
+    log "INFO" "[Web] 首次生成固定操作密钥：$DOWNLOAD_KEY"
+  fi
+  export DOWNLOAD_KEY
+}
+
 singbox_version() {
   local bin="$1"
   [ -x "$bin" ] || return 1
@@ -207,6 +224,11 @@ print_info() {
   printf 'TLS SNI: %s\n' "$HY2_SNI"
   printf '允许不安全证书: true\n'
   printf 'Web HTTPS: https://%s:%s/\n' "$TLS_CERT_IP" "$HTTP_LISTEN_PORT"
+  if [[ -n "${DOWNLOAD_KEY:-}" ]]; then
+    printf 'Web 操作密钥 DOWNLOAD_KEY: %s\n' "$DOWNLOAD_KEY"
+  else
+    printf 'Web 操作密钥 DOWNLOAD_KEY: 未设置，无需密码\n'
+  fi
   printf '==============================================\n\n'
 }
 
@@ -247,6 +269,7 @@ main() {
   section "启动 sing-box-only 脚本"
   log "INFO" "HY2_PORT=$HY2_PORT HTTP_LISTEN_PORT=$HTTP_LISTEN_PORT HY2_SNI=$HY2_SNI TLS_CERT_IP=$TLS_CERT_IP"
   setup_uuid
+  setup_download_key
   install_singbox
   setup_cert_and_config
   start_singbox

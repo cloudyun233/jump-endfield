@@ -43,10 +43,9 @@ TLS_CERT_IP=YOUR_SERVER_IP
 HTTP_LISTEN_PORT=YOUR_PORT
 DOWNLOAD_MAX_ACTIVE=1
 DOWNLOAD_MAX_QUEUE=3
-DOWNLOAD_KEY=YOUR_OPTIONAL_WEB_KEY
 ```
 
-如果不需要 Web 操作密钥，可以留空 `DOWNLOAD_KEY`。
+Web 操作密钥默认开启。首次启动会自动生成并持久化到 `.npm/video/download_key.txt`，后续启动复用同一个密钥；如果确实需要手动指定，也可以设置 `DOWNLOAD_KEY=YOUR_WEB_KEY` 覆盖默认值。
 
 ## 5. 访问页面
 

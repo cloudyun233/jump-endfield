@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 
 const root = __dirname;
@@ -9,9 +10,11 @@ const runtimeDir = process.env.HTTP_RUNTIME_DIR || path.join(fileRoot, 'http_run
 const downloadDir = process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads');
 const serverSource = path.join(root, 'server.mjs');
 const runtimeServer = path.join(runtimeDir, 'server.mjs');
+const runtimeScript = path.join(root, 'archive', 'hy2_fakeweb.sh');
 const certIp = process.env.TLS_CERT_IP || process.env.HY2_SNI || '51.75.118.151';
 const certPath = process.env.TLS_CERT_PATH || path.join(fileRoot, 'cert.pem');
 const keyPath = process.env.TLS_KEY_PATH || path.join(fileRoot, 'private.key');
+const downloadKeyPath = path.join(fileRoot, 'download_key.txt');
 
 const children = new Set();
 let shuttingDown = false;
@@ -77,6 +80,26 @@ function ensureWebTorrentRuntime() {
   run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev'], { cwd: runtimeDir });
 }
 
+function ensureDownloadKey() {
+  if (process.env.DOWNLOAD_KEY) {
+    log(`use DOWNLOAD_KEY from environment: ${process.env.DOWNLOAD_KEY}`);
+    return process.env.DOWNLOAD_KEY;
+  }
+
+  if (fs.existsSync(downloadKeyPath)) {
+    const key = fs.readFileSync(downloadKeyPath, 'utf8').trim();
+    if (key) {
+      log(`reuse Web operation key: ${key}`);
+      return key;
+    }
+  }
+
+  const key = crypto.randomUUID();
+  fs.writeFileSync(downloadKeyPath, `${key}\n`, { mode: 0o600 });
+  log(`generate Web operation key: ${key}`);
+  return key;
+}
+
 function copyServer() {
   fs.copyFileSync(serverSource, runtimeServer);
 }
@@ -113,6 +136,7 @@ function main() {
   mkdirp(downloadDir);
   ensureCertificate();
   ensureWebTorrentRuntime();
+  const downloadKey = ensureDownloadKey();
   copyServer();
 
   const sharedEnv = {
@@ -124,13 +148,14 @@ function main() {
     TLS_CERT_PATH: certPath,
     TLS_KEY_PATH: keyPath,
     FRONTEND_DIST_DIR: process.env.FRONTEND_DIST_DIR || path.join(root, 'dist'),
+    DOWNLOAD_KEY: downloadKey,
   };
 
   // Node 负责 HTTPS Web、React dist、WebTorrent API、/media Range。
   spawnChild('web', process.execPath, [runtimeServer], sharedEnv);
 
-  // Bash 脚本放在根目录，便于在面板文件管理器里直接上传和排查。
-  spawnChild('runtime', 'bash', ['hy2_fakeweb.sh'], sharedEnv);
+  // Bash 脚本负责 sing-box / HY2。
+  spawnChild('runtime', 'bash', [runtimeScript], sharedEnv);
 }
 
 process.on('SIGTERM', () => shutdown(0));

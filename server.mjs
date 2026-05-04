@@ -11,7 +11,8 @@ const downloadRoot = path.resolve(process.env.DOWNLOAD_DIR || path.join(fileRoot
 const frontendDist = path.resolve(process.env.FRONTEND_DIST_DIR || path.join(process.cwd(), 'dist'));
 const certPath = path.resolve(process.env.TLS_CERT_PATH || path.join(fileRoot, 'cert.pem'));
 const keyPath = path.resolve(process.env.TLS_KEY_PATH || path.join(fileRoot, 'private.key'));
-const downloadKey = process.env.DOWNLOAD_KEY || '';
+const downloadKeyFile = path.join(fileRoot, 'download_key.txt');
+const downloadKey = loadDownloadKey();
 const maxActive = Math.max(1, Number(process.env.DOWNLOAD_MAX_ACTIVE || 1));
 const maxQueued = Math.max(0, Number(process.env.DOWNLOAD_MAX_QUEUE || 3));
 const maxConns = Math.max(12, Number(process.env.DOWNLOAD_MAX_CONNS || 32));
@@ -30,6 +31,20 @@ const mime = {
   '.ts': 'video/mp2t',
   '.m3u8': 'application/vnd.apple.mpegurl',
 };
+
+function loadDownloadKey() {
+  if (process.env.DOWNLOAD_KEY) return process.env.DOWNLOAD_KEY;
+  try {
+    const key = fs.readFileSync(downloadKeyFile, 'utf8').trim();
+    if (key) return key;
+  } catch {
+    // Generate below when the key file does not exist yet.
+  }
+  const key = crypto.randomUUID();
+  fs.mkdirSync(fileRoot, { recursive: true });
+  fs.writeFileSync(downloadKeyFile, `${key}\n`, { mode: 0o600 });
+  return key;
+}
 const staticMime = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -672,5 +687,18 @@ server.on('error', (error) => {
 });
 
 server.listen(port, '::', () => {
-  log('[HTTPS] listening on', port, 'frontend=', frontendDist, 'root=', fileRoot, 'download=', downloadRoot, 'auth=', !!downloadKey);
+  log(
+    '[HTTPS] listening on',
+    port,
+    'frontend=',
+    frontendDist,
+    'root=',
+    fileRoot,
+    'download=',
+    downloadRoot,
+    'auth=',
+    !!downloadKey,
+    'DOWNLOAD_KEY=',
+    downloadKey || '未设置，无需密码',
+  );
 });
