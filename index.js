@@ -10,7 +10,9 @@ const runtimeDir = process.env.HTTP_RUNTIME_DIR || path.join(fileRoot, 'http_run
 const downloadDir = process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads');
 const serverSource = path.join(root, 'server.mjs');
 const runtimeServer = path.join(runtimeDir, 'server.mjs');
-const runtimeScript = path.join(root, 'archive', 'hy2_fakeweb.sh');
+const runtimeScript = fs.existsSync(path.join(root, 'archive', 'hy2_fakeweb.sh'))
+  ? path.join(root, 'archive', 'hy2_fakeweb.sh')
+  : path.join(root, 'hy2_fakeweb.sh');
 const certIp = process.env.TLS_CERT_IP || process.env.HY2_SNI || '51.75.118.151';
 const certPath = process.env.TLS_CERT_PATH || path.join(fileRoot, 'cert.pem');
 const keyPath = process.env.TLS_KEY_PATH || path.join(fileRoot, 'private.key');
