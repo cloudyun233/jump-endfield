@@ -10,9 +10,7 @@ const runtimeDir = process.env.HTTP_RUNTIME_DIR || path.join(fileRoot, 'http_run
 const downloadDir = process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads');
 const serverSource = path.join(root, 'server.mjs');
 const runtimeServer = path.join(runtimeDir, 'server.mjs');
-const runtimeScript = fs.existsSync(path.join(root, 'archive', 'hy2_fakeweb.sh'))
-  ? path.join(root, 'archive', 'hy2_fakeweb.sh')
-  : path.join(root, 'hy2_fakeweb.sh');
+const runtimeScript = path.join(root, 'hy2_fakeweb.sh');
 const certIp = process.env.TLS_CERT_IP || process.env.HY2_SNI || '51.75.118.151';
 const certPath = process.env.TLS_CERT_PATH || path.join(fileRoot, 'cert.pem');
 const keyPath = process.env.TLS_KEY_PATH || path.join(fileRoot, 'private.key');
@@ -103,6 +101,7 @@ function ensureDownloadKey() {
 }
 
 function copyServer() {
+  log(`copy web server runtime: ${serverSource} -> ${runtimeServer}`);
   fs.copyFileSync(serverSource, runtimeServer);
 }
 
@@ -133,6 +132,9 @@ function shutdown(code = 0) {
 }
 
 function main() {
+  log(`startup root: ${root}`);
+  if (!fs.existsSync(serverSource)) throw new Error(`missing server.mjs beside index.js: ${serverSource}`);
+  if (!fs.existsSync(runtimeScript)) throw new Error(`missing hy2_fakeweb.sh beside index.js: ${runtimeScript}`);
   mkdirp(fileRoot);
   mkdirp(runtimeDir);
   mkdirp(downloadDir);
@@ -154,9 +156,11 @@ function main() {
   };
 
   // Node 负责 HTTPS Web、React dist、WebTorrent API、/media Range。
+  log(`spawn web server: ${runtimeServer}`);
   spawnChild('web', process.execPath, [runtimeServer], sharedEnv);
 
   // Bash 脚本负责 sing-box / HY2。
+  log(`spawn HY2 runtime script: ${runtimeScript}`);
   spawnChild('runtime', 'bash', [runtimeScript], sharedEnv);
 }
 

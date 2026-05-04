@@ -204,6 +204,7 @@ try {
 const announceList = await loadTrackers();
 const client = WebTorrent ? new WebTorrent({ maxConns, tracker: announceList.length ? { announce: announceList } : true }) : null;
 if (!client) log('[WebTorrent] unavailable:', loadErr);
+if (client) log('[WebTorrent] ready', 'maxActive=', maxActive, 'maxQueued=', maxQueued, 'maxConns=', maxConns, 'trackers=', announceList.length);
 
 const queued = [];
 const failed = new Map();
@@ -251,15 +252,21 @@ function findTorrent(id) {
 
 function torrentView(torrent) {
   const id = normId(torrent.infoHash || '');
+  const downloaded = Number(torrent.downloaded || 0);
+  const length = Number(torrent.length || 0);
+  const downloadSpeed = Number(torrent.downloadSpeed || 0);
   return {
     id,
     infoHash: id,
     name: torrent.name || `下载任务 ${id.slice(0, 8)}`,
     state: torrent.done ? 'done' : 'downloading',
     progress: Number.isFinite(torrent.progress) ? Math.round(torrent.progress * 1000) / 10 : 0,
-    downloadedText: human(torrent.downloaded || 0),
-    lengthText: torrent.length ? human(torrent.length) : '获取元数据中',
-    downloadSpeedText: `${human(torrent.downloadSpeed || 0)}/s`,
+    downloaded,
+    length,
+    downloadSpeed,
+    downloadedText: human(downloaded),
+    lengthText: length ? human(length) : '获取元数据中',
+    downloadSpeedText: `${human(downloadSpeed)}/s`,
     peers: torrent.numPeers || 0,
     addedAt: addedAt.get(id) || Date.now(),
     error: '',
@@ -273,6 +280,9 @@ function queuedView(item) {
     name: item.name || `排队任务 ${item.id.slice(0, 8)}`,
     state: 'queued',
     progress: 0,
+    downloaded: 0,
+    length: 0,
+    downloadSpeed: 0,
     downloadedText: '0 B',
     lengthText: '等待中',
     downloadSpeedText: '排队中',
@@ -289,6 +299,9 @@ function failedView([id, error]) {
     name: `失败任务 ${id.slice(0, 8)}`,
     state: 'failed',
     progress: 0,
+    downloaded: 0,
+    length: 0,
+    downloadSpeed: 0,
     downloadedText: '0 B',
     lengthText: '—',
     downloadSpeedText: '—',
@@ -307,6 +320,7 @@ function startQueue() {
   while (activeCount() < maxActive && queued.length) {
     const item = queued.shift();
     try {
+      log('[Queue] starting queued task', item.id, 'remaining=', queued.length);
       startMagnet(item.magnet, item.id, item.addedAt);
     } catch (error) {
       // 队列项已经移出 queued，启动失败时必须保留为 failed，
@@ -322,12 +336,19 @@ function attachTorrent(torrent, id, at) {
     const hash = normId(torrent.infoHash || id);
     addedAt.set(hash, addedAt.get(id) || at);
     if (id !== hash) addedAt.delete(id);
+    return hash;
   };
-  torrent.once('metadata', remember);
-  torrent.once('ready', remember);
+  torrent.once('metadata', () => {
+    const hash = remember();
+    log('[Torrent] metadata', hash, 'name=', torrent.name || '', 'length=', torrent.length || 0, 'files=', torrent.files?.length || 0);
+  });
+  torrent.once('ready', () => {
+    const hash = remember();
+    log('[Torrent] ready', hash, 'name=', torrent.name || '', 'peers=', torrent.numPeers || 0);
+  });
   torrent.once('done', () => {
-    remember();
-    const hash = normId(torrent.infoHash || id);
+    const hash = remember();
+    log('[Torrent] done', hash, 'name=', torrent.name || '', 'downloaded=', torrent.downloaded || 0);
     addedAt.delete(hash);
     try {
       client.remove(torrent, { destroyStore: false }, () => {});
@@ -337,6 +358,7 @@ function attachTorrent(torrent, id, at) {
   torrent.once('error', (error) => {
     const hash = normId(torrent.infoHash || id);
     failed.set(hash, { error: error?.message || String(error), addedAt: Date.now() });
+    log('[Torrent] error', hash, error?.message || error);
     try {
       client.remove(torrent, { destroyStore: false }, () => {});
     } catch {}
@@ -345,6 +367,7 @@ function attachTorrent(torrent, id, at) {
 }
 
 function startMagnet(magnet, id, at) {
+  log('[Download] start magnet', id, 'path=', downloadRoot);
   const torrent = client.add(magnet, { path: downloadRoot, announce: announceList });
   addedAt.set(normId(torrent.infoHash || id), at);
   attachTorrent(torrent, id, at);
@@ -391,6 +414,7 @@ async function walk(dir = fileRoot, depth = 0, blocked = activeVideoRels()) {
         rel,
         size: stat.size,
         sizeText: human(stat.size),
+        mtimeMs: stat.mtimeMs,
         mtime: stat.mtime.toISOString().slice(0, 16).replace('T', ' '),
         type: mime[ext] || 'application/octet-stream',
         url: `/media/${id}`,
@@ -437,6 +461,10 @@ async function space() {
   } catch {}
   const lib = await dirBytes();
   return {
+    total,
+    available: avail,
+    used,
+    library: lib,
     totalText: total ? human(total) : '—',
     availableText: avail ? human(avail) : '—',
     usedText: total ? human(used) : human(lib),
@@ -451,6 +479,15 @@ function thumb(name) {
 }
 
 async function status() {
+  const files = await walk();
+  const spaceInfo = await space();
+  const torrents = [
+    ...liveTorrents().map(torrentView),
+    ...queued.map(queuedView),
+    ...failed.entries(),
+  ].map((item) => (Array.isArray(item) ? failedView(item) : item)).sort((a, b) => b.addedAt - a.addedAt);
+  const totalDownloadSpeed = torrents.reduce((sum, item) => sum + Number(item.downloadSpeed || 0), 0);
+
   return {
     ok: true,
     downloadEnabled: !!client,
@@ -460,13 +497,19 @@ async function status() {
     maxQueued,
     trackers: announceList.length,
     visitors: { weekKey: visitors.weekKey, weeklyVisitors: visitorSet.size },
-    files: await walk(),
-    space: await space(),
-    torrents: [
-      ...liveTorrents().map(torrentView),
-      ...queued.map(queuedView),
-      ...failed.entries(),
-    ].map((item) => (Array.isArray(item) ? failedView(item) : item)).sort((a, b) => b.addedAt - a.addedAt),
+    summary: {
+      fileCount: files.length,
+      taskCount: torrents.length,
+      downloadingCount: torrents.filter((item) => item.state === 'downloading').length,
+      queuedCount: torrents.filter((item) => item.state === 'queued').length,
+      failedCount: torrents.filter((item) => item.state === 'failed').length,
+      doneCount: torrents.filter((item) => item.state === 'done').length,
+      totalDownloadSpeed,
+      totalDownloadSpeedText: `${human(totalDownloadSpeed)}/s`,
+    },
+    files,
+    space: spaceInfo,
+    torrents,
   };
 }
 
@@ -484,10 +527,17 @@ async function addMagnet(req, res) {
     return sendJson(res, 400, { ok: false, error: '请输入有效磁力链接' });
   }
   const id = magnetId(magnet);
+  log('[Download] add request', id, 'active=', activeCount(), 'queued=', queued.length);
   const existing = findTorrent(id);
-  if (existing) return sendJson(res, 202, { ok: true, torrent: torrentView(existing) });
+  if (existing) {
+    log('[Download] already active', id);
+    return sendJson(res, 202, { ok: true, torrent: torrentView(existing) });
+  }
   const queuedItem = queued.find((item) => item.id === id);
-  if (queuedItem) return sendJson(res, 202, { ok: true, torrent: queuedView(queuedItem) });
+  if (queuedItem) {
+    log('[Download] already queued', id);
+    return sendJson(res, 202, { ok: true, torrent: queuedView(queuedItem) });
+  }
 
   failed.delete(id);
   const at = Date.now();
@@ -496,13 +546,18 @@ async function addMagnet(req, res) {
       return sendJson(res, 202, { ok: true, torrent: torrentView(startMagnet(magnet, id, at)) });
     } catch (error) {
       failed.set(id, { error: error?.message || String(error), addedAt: at });
+      log('[Download] start failed', id, error?.message || error);
       return sendJson(res, 500, { ok: false, error: error?.message || String(error) });
     }
   }
 
-  if (queued.length >= maxQueued) return sendJson(res, 429, { ok: false, error: `队列已满：最多 ${maxQueued} 个等待任务` });
+  if (queued.length >= maxQueued) {
+    log('[Queue] rejected full', id, 'maxQueued=', maxQueued);
+    return sendJson(res, 429, { ok: false, error: `队列已满：最多 ${maxQueued} 个等待任务` });
+  }
   const item = { id, magnet, addedAt: at, name: `排队任务 ${id.slice(0, 8)}` };
   queued.push(item);
+  log('[Queue] queued task', id, 'size=', queued.length);
   return sendJson(res, 202, { ok: true, torrent: queuedView(item) });
 }
 
@@ -511,15 +566,24 @@ async function delTask(req, res, id) {
   const queueIndex = queued.findIndex((item) => item.id === id);
   if (queueIndex >= 0) {
     queued.splice(queueIndex, 1);
+    log('[Download] delete queued task', id);
     return sendJson(res, 200, { ok: true });
   }
-  if (failed.delete(id)) return sendJson(res, 200, { ok: true });
+  if (failed.delete(id)) {
+    log('[Download] delete failed task', id);
+    return sendJson(res, 200, { ok: true });
+  }
   const torrent = findTorrent(id);
-  if (!torrent) return sendJson(res, 404, { ok: false, error: '未找到任务' });
+  if (!torrent) {
+    log('[Download] delete task not found', id);
+    return sendJson(res, 404, { ok: false, error: '未找到任务' });
+  }
   try {
     client.remove(torrent, { destroyStore: false }, () => startQueue());
+    log('[Download] delete active task', id);
     return sendJson(res, 200, { ok: true });
   } catch (error) {
+    log('[Download] delete task failed', id, error?.message || error);
     return sendJson(res, 500, { ok: false, error: error?.message || String(error) });
   }
 }
@@ -536,8 +600,10 @@ async function delFile(req, res, id) {
     const stat = await fsp.stat(full);
     if (!stat.isFile()) throw new Error('不是文件');
     await fsp.unlink(full);
+    log('[Library] delete file', rel, 'size=', stat.size);
     return sendJson(res, 200, { ok: true });
   } catch (error) {
+    log('[Library] delete file failed', rel, error?.message || error);
     return sendJson(res, 500, { ok: false, error: error?.message || String(error) });
   }
 }
@@ -593,11 +659,13 @@ function serveMedia(req, res, id) {
       }
       end = Math.min(end, total - 1);
       res.writeHead(206, { ...common, 'Content-Range': `bytes ${start}-${end}/${total}`, 'Content-Length': end - start + 1 });
+      log('[Media] range', rel, `${start}-${end}/${total}`, 'head=', head);
       if (head) return res.end();
       return fs.createReadStream(full, { start, end }).pipe(res);
     }
 
     res.writeHead(200, { ...common, 'Content-Length': total });
+    log('[Media] full', rel, 'total=', total, 'head=', head);
     if (head) return res.end();
     fs.createReadStream(full).pipe(res);
   });

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
 const STATUS_INTERVAL_MS = 5000;
+const KEY_STORAGE = 'moonroom.accessKey';
+const RECENT_STORAGE = 'moonroom.recentFiles';
+const PROGRESS_STORAGE = 'moonroom.playProgress';
 
 function apiPath(path) {
   return `${API_BASE}${path}`;
@@ -15,6 +18,21 @@ function serverAsset(url) {
   // 如果用户把 dist 上传到独立静态站点，可在构建时设置 VITE_API_BASE，
   // 这里会同步把视频与封面请求指回脚本 API 域名。
   return `${API_BASE}${value.startsWith('/') ? value : `/${value}`}`;
+}
+
+function readLocal(key, fallback) {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLocal(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
 }
 
 async function readJson(response) {
@@ -59,11 +77,41 @@ function taskStateText(state) {
   }[state] || state || '未知';
 }
 
+function progressLabel(saved) {
+  if (!saved?.duration || !saved?.time) return '';
+  return `${Math.round((saved.time / saved.duration) * 100)}%`;
+}
+
+function sortFiles(files, sortMode, recentIds) {
+  const recentRank = new Map(recentIds.map((id, index) => [id, index]));
+  const next = [...files];
+  if (sortMode === 'name') return next.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }));
+  if (sortMode === 'size') return next.sort((a, b) => Number(b.size || 0) - Number(a.size || 0));
+  if (sortMode === 'recent') {
+    return next.sort((a, b) => {
+      const ar = recentRank.has(a.id) ? recentRank.get(a.id) : 9999;
+      const br = recentRank.has(b.id) ? recentRank.get(b.id) : 9999;
+      return ar - br || Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0);
+    });
+  }
+  return next.sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
+}
+
 function Empty({ children }) {
   return <div className="empty">{children}</div>;
 }
 
-function VideoCard({ file, onDelete, onPlaybackChange, onPlaybackError }) {
+function Stat({ label, value, detail }) {
+  return (
+    <div className="stat">
+      <span>{label}</span>
+      <b>{value}</b>
+      {detail ? <em>{detail}</em> : null}
+    </div>
+  );
+}
+
+function VideoCard({ file, savedProgress, isRecent, onDelete, onPlayed, onPlaybackChange, onPlaybackError, onProgress }) {
   const videoRef = useRef(null);
   const loadedRef = useRef(false);
 
@@ -92,27 +140,39 @@ function VideoCard({ file, onDelete, onPlaybackChange, onPlaybackError }) {
   }, [loadMedia, onPlaybackError]);
 
   return (
-    <article className="card">
-      <video
-        ref={videoRef}
-        preload="none"
-        poster={serverAsset(file.thumbUrl)}
-        controls
-        playsInline
-        onPointerDownCapture={loadMedia}
-        onPlay={() => {
-          loadMedia();
-          onPlaybackChange(file.id, true);
-        }}
-        onPause={() => onPlaybackChange(file.id, false)}
-        onEnded={() => onPlaybackChange(file.id, false)}
-      />
+    <article className="video-card">
+      <div className="poster-shell">
+        <video
+          ref={videoRef}
+          preload="none"
+          poster={serverAsset(file.thumbUrl)}
+          controls
+          playsInline
+          onLoadedMetadata={(event) => {
+            if (savedProgress?.time && savedProgress.time < event.currentTarget.duration - 8) {
+              event.currentTarget.currentTime = savedProgress.time;
+            }
+          }}
+          onPointerDownCapture={loadMedia}
+          onPlay={() => {
+            loadMedia();
+            onPlayed(file.id);
+            onPlaybackChange(file.id, true);
+          }}
+          onPause={() => onPlaybackChange(file.id, false)}
+          onEnded={() => onPlaybackChange(file.id, false)}
+          onTimeUpdate={(event) => onProgress(file.id, event.currentTarget.currentTime, event.currentTarget.duration)}
+        />
+        <button className="play-float" type="button" onClick={play}>播放</button>
+        {isRecent ? <span className="badge">最近</span> : null}
+      </div>
+
       <div className="meta">
         <div className="title" title={file.name}>{file.name}</div>
         <div className="subtle">{file.sizeText} · {file.mtime}</div>
-        <div className="row">
-          <button className="btn2" type="button" onClick={play}>播放</button>
-          <button className="btn2" type="button" onClick={() => onDelete(file.id)}>删除</button>
+        <div className="card-actions">
+          <span>{progressLabel(savedProgress) || file.type}</span>
+          <button className="ghost-btn danger-btn" type="button" onClick={() => onDelete(file.id)}>删除</button>
         </div>
       </div>
     </article>
@@ -120,15 +180,18 @@ function VideoCard({ file, onDelete, onPlaybackChange, onPlaybackError }) {
 }
 
 function TaskItem({ task, onDelete }) {
+  const isBad = task.state === 'failed';
+
   return (
-    <div className="task">
-      <div className="row">
+    <div className={isBad ? 'task task-bad' : 'task'}>
+      <div className="task-head">
         <b className="task-title" title={task.name}>{task.name}</b>
-        <button className="btn2" type="button" onClick={() => onDelete(task.id)}>移除</button>
+        <button className="ghost-btn" type="button" onClick={() => onDelete(task.id)}>移除</button>
       </div>
       <div className="task-line">
-        {taskStateText(task.state)} · {task.downloadedText} / {task.lengthText} · {task.downloadSpeedText} · {task.peers} 连接
+        {taskStateText(task.state)} · {task.downloadedText} / {task.lengthText}
       </div>
+      <div className="task-line">{task.downloadSpeedText} · {task.peers} 连接</div>
       {task.error ? <div className="bad">{task.error}</div> : null}
       <div className="bar">
         <div className="fill" style={{ width: percent(task.progress) }} />
@@ -138,16 +201,30 @@ function TaskItem({ task, onDelete }) {
 }
 
 export default function App() {
-  const [accessKey, setAccessKey] = useState('');
+  const [accessKey, setAccessKey] = useState(() => readLocal(KEY_STORAGE, ''));
   const [magnet, setMagnet] = useState('');
   const [message, setMessage] = useState({ text: '', bad: false });
   const [status, setStatus] = useState(null);
   const [files, setFiles] = useState([]);
   const [tasks, setTasks] = useState([]);
+  const [query, setQuery] = useState('');
+  const [sortMode, setSortMode] = useState('latest');
+  const [recentIds, setRecentIds] = useState(() => readLocal(RECENT_STORAGE, []));
+  const [progressMap, setProgressMap] = useState(() => readLocal(PROGRESS_STORAGE, {}));
 
   const fileSigRef = useRef('');
   const pendingFilesRef = useRef(null);
   const playingIdsRef = useRef(new Set());
+  const progressWriteRef = useRef(0);
+
+  useEffect(() => {
+    if (accessKey.trim()) writeLocal(KEY_STORAGE, accessKey);
+    else {
+      try {
+        window.localStorage.removeItem(KEY_STORAGE);
+      } catch {}
+    }
+  }, [accessKey]);
 
   const authHeaders = useMemo(() => {
     const key = accessKey.trim();
@@ -287,73 +364,178 @@ export default function App() {
     flushPendingFiles();
   }, [flushPendingFiles]);
 
+  const handlePlayed = useCallback((id) => {
+    setRecentIds((old) => {
+      const next = [id, ...old.filter((item) => item !== id)].slice(0, 16);
+      writeLocal(RECENT_STORAGE, next);
+      return next;
+    });
+  }, []);
+
+  const handleProgress = useCallback((id, time, duration) => {
+    if (!Number.isFinite(time) || !Number.isFinite(duration) || duration <= 0) return;
+    const now = Date.now();
+    if (now - progressWriteRef.current < 1500) return;
+    progressWriteRef.current = now;
+
+    setProgressMap((old) => {
+      const next = { ...old, [id]: { time, duration, updatedAt: now } };
+      writeLocal(PROGRESS_STORAGE, next);
+      return next;
+    });
+  }, []);
+
+  const clearLocalHistory = useCallback(() => {
+    setRecentIds([]);
+    setProgressMap({});
+    writeLocal(RECENT_STORAGE, []);
+    writeLocal(PROGRESS_STORAGE, {});
+  }, []);
+
+  const visibleFiles = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const filtered = needle
+      ? files.filter((file) => `${file.name} ${file.rel || ''}`.toLowerCase().includes(needle))
+      : files;
+    return sortFiles(filtered, sortMode, recentIds);
+  }, [files, query, recentIds, sortMode]);
+
   const space = status?.space || {};
   const visitors = status?.visitors || {};
+  const summary = status?.summary || {};
+  const activeTasks = summary.downloadingCount ?? tasks.filter((task) => task.state === 'downloading').length;
+  const queuedTasks = summary.queuedCount ?? tasks.filter((task) => task.state === 'queued').length;
+  const failedTasks = summary.failedCount ?? tasks.filter((task) => task.state === 'failed').length;
+  const totalSpeed = summary.totalDownloadSpeedText || '0 B/s';
 
   return (
     <main className="page">
-      <header className="header">
-        <h1>月光放映室</h1>
-        <div className="subtle">本周访客 <b>{visitors.weeklyVisitors ?? '—'}</b></div>
+      <header className="topbar">
+        <a className="brand" href="#library" aria-label="Moonroom">
+          <span className="brand-mark">M</span>
+          <span>
+            <strong>Moonroom</strong>
+            <small>Private Cinema</small>
+          </span>
+        </a>
+        <nav className="nav">
+          <a href="#library">片库</a>
+          <a href="#tasks">任务</a>
+          <a href="https://hanime1.me/" target="_blank" rel="noopener noreferrer">Hanime</a>
+        </nav>
+        <div className="visitor-pill">本周 {visitors.weeklyVisitors ?? '—'}</div>
       </header>
 
-      <section className="panel">
-        <div className="form">
-          <input
-            className="input"
-            value={magnet}
-            onChange={(event) => setMagnet(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') addMagnet();
-            }}
-            placeholder="粘贴 magnet 磁力链接"
-          />
-          <button className="btn" type="button" onClick={addMagnet}>开始下载</button>
+      <section className="hero-panel">
+        <div className="hero-copy">
+          <p>Moonroom</p>
+          <h1>月光放映室</h1>
         </div>
 
-        <input
-          className="input key-input"
-          value={accessKey}
-          onChange={(event) => setAccessKey(event.target.value)}
-          placeholder="访问密钥：下载、移除任务、删除影片时需要"
-        />
-
-        <div className="stats">
-          <div className="stat">
-            <span>已用空间</span>
-            <b>{space.usedText || '—'} / {space.totalText || '—'}</b>
-            <div className="bar"><div className="fill" style={{ width: percent(space.usedPct) }} /></div>
+        <div className="command-panel">
+          <div className="magnet-row">
+            <input
+              className="input magnet-input"
+              value={magnet}
+              onChange={(event) => setMagnet(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') addMagnet();
+              }}
+              placeholder="magnet:?xt=urn:btih:..."
+            />
+            <button className="primary-btn" type="button" onClick={addMagnet}>开始下载</button>
           </div>
-          <div className="stat"><span>可用空间</span><b>{space.availableText || '—'}</b></div>
-          <div className="stat"><span>片库占用</span><b>{space.libraryText || '—'}</b></div>
-          <div className="stat"><span>任务限制</span><b>{status ? `${status.maxActive} 下载 / ${status.maxQueued} 排队` : '—'}</b></div>
-          <div className="stat"><span>Tracker</span><b>{status?.trackers ?? '—'}</b></div>
+          <div className="key-row">
+            <input
+              className="input"
+              type="password"
+              value={accessKey}
+              onChange={(event) => setAccessKey(event.target.value)}
+              placeholder="访问密钥"
+            />
+            <div className={message.bad ? 'message bad' : 'message'}>{message.text || '状态就绪'}</div>
+          </div>
         </div>
-
-        <div className={message.bad ? 'message bad' : 'message'}>{message.text}</div>
       </section>
 
-      <section className="layout">
-        <section>
-          <h2>影片</h2>
+      <section className="stats">
+        <Stat label="影片" value={summary.fileCount ?? files.length} detail={space.libraryText || '—'} />
+        <Stat label="任务" value={`${activeTasks} / ${queuedTasks}`} detail={`${failedTasks} 失败`} />
+        <Stat label="速度" value={totalSpeed} detail={`${status?.trackers ?? '—'} tracker`} />
+        <div className="stat">
+          <span>空间</span>
+          <b>{space.availableText || '—'}</b>
+          <em>{space.usedText || '—'} / {space.totalText || '—'}</em>
+          <div className="bar"><div className="fill" style={{ width: percent(space.usedPct) }} /></div>
+        </div>
+      </section>
+
+      <section className="app-layout">
+        <section className="library" id="library">
+          <div className="section-head">
+            <div>
+              <p>Library</p>
+              <h2>片库</h2>
+            </div>
+            <div className="tools">
+              <input
+                className="input search-input"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索片名"
+              />
+              <select className="select" value={sortMode} onChange={(event) => setSortMode(event.target.value)}>
+                <option value="latest">最新</option>
+                <option value="recent">最近播放</option>
+                <option value="name">名称</option>
+                <option value="size">大小</option>
+              </select>
+            </div>
+          </div>
+
           <div className="grid">
-            {files.length ? files.map((file) => (
+            {visibleFiles.length ? visibleFiles.map((file) => (
               <VideoCard
                 key={file.id}
                 file={file}
+                savedProgress={progressMap[file.id]}
+                isRecent={recentIds.includes(file.id)}
                 onDelete={deleteFile}
+                onPlayed={handlePlayed}
                 onPlaybackChange={handlePlaybackChange}
                 onPlaybackError={(text) => showMessage(text, true)}
+                onProgress={handleProgress}
               />
             )) : <Empty>暂无影片。</Empty>}
           </div>
         </section>
 
-        <aside>
-          <h2>任务</h2>
-          {tasks.length ? tasks.map((task) => (
-            <TaskItem key={task.id} task={task} onDelete={deleteTask} />
-          )) : <Empty>暂无任务。</Empty>}
+        <aside className="side-rail" id="tasks">
+          <section className="rail-section">
+            <div className="rail-head">
+              <h2>任务</h2>
+              <span>{tasks.length}</span>
+            </div>
+            {tasks.length ? tasks.map((task) => (
+              <TaskItem key={task.id} task={task} onDelete={deleteTask} />
+            )) : <Empty>暂无任务。</Empty>}
+          </section>
+
+          <section className="rail-section">
+            <div className="rail-head">
+              <h2>记录</h2>
+              <button className="ghost-btn" type="button" onClick={clearLocalHistory}>清空</button>
+            </div>
+            {recentIds.length ? recentIds.slice(0, 5).map((id) => {
+              const file = files.find((item) => item.id === id);
+              return (
+                <div className="recent-item" key={id}>
+                  <span>{file?.name || id.slice(0, 10)}</span>
+                  <b>{progressLabel(progressMap[id]) || '—'}</b>
+                </div>
+              );
+            }) : <Empty>暂无记录。</Empty>}
+          </section>
         </aside>
       </section>
     </main>
