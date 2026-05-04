@@ -748,9 +748,40 @@ async function getSpace() {
   };
 }
 
+const base32Chars = 'abcdefghijklmnopqrstuvwxyz234567';
+
+function safeDecodeComponent(value) {
+  try { return decodeURIComponent(String(value || '')); }
+  catch { return String(value || ''); }
+}
+
+function base32BtihToHex(value) {
+  let bits = '';
+  for (const ch of String(value || '').toLowerCase().replace(/=+$/g, '')) {
+    const idx = base32Chars.indexOf(ch);
+    if (idx < 0) return '';
+    bits += idx.toString(2).padStart(5, '0');
+  }
+  let hex = '';
+  for (let i = 0; i + 4 <= bits.length; i += 4) {
+    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  }
+  return hex;
+}
+
+function normalizeBtih(value) {
+  const btih = safeDecodeComponent(value).trim().toLowerCase();
+  if (/^[a-f0-9]{40}$/.test(btih)) return btih;
+  if (/^[a-z2-7]{32}$/.test(btih)) {
+    const hex = base32BtihToHex(btih);
+    if (/^[a-f0-9]{40}$/.test(hex)) return hex;
+  }
+  return btih;
+}
+
 function magnetTaskId(magnet) {
-  const m = /xt=urn:btih:([^&]+)/i.exec(String(magnet || ''));
-  return (m?.[1] || Buffer.from(String(magnet || '')).toString('base64url').slice(0, 32)).toLowerCase();
+  const m = /(?:^|[?&])xt=urn:btih:([^&]+)/i.exec(String(magnet || ''));
+  return m?.[1] ? normalizeBtih(m[1]) : Buffer.from(String(magnet || '')).toString('base64url').slice(0, 32).toLowerCase();
 }
 
 function createDownloadManager({ maxActive = 1, maxQueued = 3 } = {}) {
@@ -811,8 +842,7 @@ function queuedView(task) {
 }
 
 function activeTaskCount() {
-  if (!client) return 0;
-  return client.torrents.filter(t => !t.done && !t.destroyed).length;
+  return liveTorrents().length;
 }
 
 function queuedTaskCount() {
@@ -826,9 +856,9 @@ function taskTotalCount() {
 function removeQueuedTask(id) {
   const task = queuedIndex.get(id);
   if (!task) return false;
-  queuedIndex.delete(id);
-  const idx = queuedDownloads.findIndex(t => t.id === id);
+  const idx = queuedDownloads.findIndex(t => t === task || t.id === id);
   if (idx >= 0) queuedDownloads.splice(idx, 1);
+  cleanupTaskMaps(id);
   return true;
 }
 
@@ -838,11 +868,63 @@ function clearStatusCache() {
 }
 
 function cleanupTaskMaps(id) {
-  if (!id) return;
-  addedAt.delete(id);
-  errors.delete(id);
-  torrentTasks.delete(id);
-  queuedIndex.delete(id);
+  const task = id ? (torrentTasks.get(id) || queuedIndex.get(id)) : null;
+  const ids = new Set();
+  if (id) ids.add(id);
+  if (task?.id) ids.add(task.id);
+  if (task) {
+    for (const [key, value] of torrentTasks) {
+      if (value === task) ids.add(key);
+    }
+    for (const [key, value] of queuedIndex) {
+      if (value === task) ids.add(key);
+    }
+  }
+  for (const key of ids) {
+    addedAt.delete(key);
+    errors.delete(key);
+    torrentTasks.delete(key);
+    queuedIndex.delete(key);
+  }
+}
+
+function isLiveTorrent(torrent) {
+  return !!torrent && !torrent.done && !torrent.destroyed;
+}
+
+function liveTorrents() {
+  return client ? client.torrents.filter(isLiveTorrent) : [];
+}
+
+function getClientTorrent(id) {
+  if (!client || !id) return null;
+  try { return client.get(id); }
+  catch { return null; }
+}
+
+function findLiveTorrentForTask(id) {
+  if (!client || !id) return null;
+  const task = torrentTasks.get(id) || queuedIndex.get(id);
+  const direct = getClientTorrent(id);
+  if (isLiveTorrent(direct)) return direct;
+  if (task?.id && task.id !== id) {
+    const byTaskId = getClientTorrent(task.id);
+    if (isLiveTorrent(byTaskId)) return byTaskId;
+  }
+  return client.torrents.find(t => isLiveTorrent(t) && (t.infoHash === id || (task && torrentTasks.get(t.infoHash || '') === task))) || null;
+}
+
+function pruneStaleTaskMaps() {
+  for (const id of [...torrentTasks.keys()]) {
+    if (!queuedIndex.has(id) && !findLiveTorrentForTask(id)) cleanupTaskMaps(id);
+  }
+}
+
+function hasLiveDownload(id) {
+  if (queuedIndex.has(id)) return true;
+  if (findLiveTorrentForTask(id)) return true;
+  if (torrentTasks.has(id)) cleanupTaskMaps(id);
+  return false;
 }
 
 async function removeClientTorrent(torrent, destroyStore = false) {
@@ -851,7 +933,7 @@ async function removeClientTorrent(torrent, destroyStore = false) {
 }
 
 async function completeTorrent(torrent) {
-  const infoHash = torrent.infoHash || '';
+  const infoHash = normalizeBtih(torrent.infoHash || '');
   await removeClientTorrent(torrent, false);
   cleanupTaskMaps(infoHash);
   startQueuedDownloads();
@@ -861,10 +943,15 @@ function attachTorrentEvents(torrent, fallbackId = '') {
   const task = torrentTasks.get(fallbackId) || torrentTasks.get(torrent.infoHash || '') || null;
   if (task) task.name = torrent.name || task.name;
   const rememberHash = () => {
-    const id = torrent.infoHash || fallbackId;
+    const id = normalizeBtih(torrent.infoHash || fallbackId);
     if (!id) return;
     addedAt.set(id, addedAt.get(fallbackId) || addedAt.get(id) || Date.now());
     if (task) {
+      if (fallbackId && fallbackId !== id) {
+        addedAt.delete(fallbackId);
+        errors.delete(fallbackId);
+        torrentTasks.delete(fallbackId);
+      }
       task.id = id;
       task.name = torrent.name || task.name;
       torrentTasks.set(id, task);
@@ -874,10 +961,10 @@ function attachTorrentEvents(torrent, fallbackId = '') {
   torrent.once('ready', rememberHash);
   torrent.once('done', () => {
     rememberHash();
-    completeTorrent(torrent).catch(err => errors.set(torrent.infoHash || fallbackId, err?.message || String(err)));
+    completeTorrent(torrent).catch(err => errors.set(normalizeBtih(torrent.infoHash || fallbackId), err?.message || String(err)));
   });
   torrent.once('error', err => {
-    const id = torrent.infoHash || fallbackId;
+    const id = normalizeBtih(torrent.infoHash || fallbackId);
     errors.set(id, err?.message || String(err));
     removeClientTorrent(torrent, false).finally(() => {
       cleanupTaskMaps(id);
@@ -897,9 +984,10 @@ function startQueuedDownloads() {
       task.startedAt = Date.now();
       const torrent = client.add(task.magnet, { path: downloadRoot, deselect: false });
       torrentTasks.set(task.id, task);
-      if (torrent.infoHash) {
-        torrentTasks.set(torrent.infoHash, task);
-        addedAt.set(torrent.infoHash, task.addedAt);
+      const infoHash = normalizeBtih(torrent.infoHash || '');
+      if (infoHash) {
+        torrentTasks.set(infoHash, task);
+        addedAt.set(infoHash, task.addedAt);
       }
       attachTorrentEvents(torrent, task.id);
       clearStatusCache();
@@ -932,8 +1020,7 @@ function torrentView(t) {
 function activeDownloadVideoRels() {
   const rels = new Set();
   if (!client) return rels;
-  for (const torrent of client.torrents) {
-    if (torrent.done) continue;
+  for (const torrent of liveTorrents()) {
     for (const file of torrent.files || []) {
       const full = path.resolve(downloadRoot, file.path || file.name || '');
       if (!safeInside(fileRoot, full) || !videoExts.has(path.extname(full).toLowerCase())) continue;
@@ -945,12 +1032,13 @@ function activeDownloadVideoRels() {
 
 async function statusPayload() {
   const now = Date.now();
+  pruneStaleTaskMaps();
   if (statusCache && now - statusCacheAt < statusCacheMs) {
-    return { ...statusCache, visitors: visitorStats(), torrents: client ? [...client.torrents.filter(t => !t.done && !t.destroyed).map(torrentView), ...queuedDownloads.map(queuedView)].sort((a, b) => b.addedAt - a.addedAt) : [] };
+    return { ...statusCache, visitors: visitorStats(), torrents: client ? [...liveTorrents().map(torrentView), ...queuedDownloads.map(queuedView)].sort((a, b) => b.addedAt - a.addedAt) : [] };
   }
   const files = await walkVideos(fileRoot, fileRoot, 0, activeDownloadVideoRels());
   const space = await getSpace();
-  const torrents = client ? [...client.torrents.filter(t => !t.done && !t.destroyed).map(torrentView), ...queuedDownloads.map(queuedView)].sort((a, b) => b.addedAt - a.addedAt) : [];
+  const torrents = client ? [...liveTorrents().map(torrentView), ...queuedDownloads.map(queuedView)].sort((a, b) => b.addedAt - a.addedAt) : [];
   const payload = {
     ok: true,
     site: '月光放映室',
@@ -1014,7 +1102,8 @@ async function addMagnet(req, res) {
   }
 
   const id = magnetTaskId(magnet);
-  if (queuedIndex.has(id) || torrentTasks.has(id) || (client.get(id) && !client.get(id).done)) {
+  pruneStaleTaskMaps();
+  if (hasLiveDownload(id)) {
     return sendJson(res, 409, { ok: false, error: '这个磁力任务已经在下载或排队中' });
   }
   if (activeTaskCount() >= maxActive && queuedTaskCount() >= maxQueued) {
@@ -1030,9 +1119,10 @@ async function addMagnet(req, res) {
       task.startedAt = Date.now();
       const torrent = client.add(magnet, { path: downloadRoot, deselect: false });
       torrentTasks.set(id, task);
-      if (torrent.infoHash) {
-        torrentTasks.set(torrent.infoHash, task);
-        addedAt.set(torrent.infoHash, task.addedAt);
+      const infoHash = normalizeBtih(torrent.infoHash || '');
+      if (infoHash) {
+        torrentTasks.set(infoHash, task);
+        addedAt.set(infoHash, task.addedAt);
       }
       attachTorrentEvents(torrent, id);
       return sendJson(res, 202, { ok: true, torrent: torrentView(torrent) });
@@ -1089,6 +1179,27 @@ if (process.env.HY2_NODE_SELFTEST === '1') {
     const visible = manager.visibleTasks();
     assert.equal(visible.some(t => t.id === first.id), false);
     assert.equal(visible.some(t => t.id === second.id && t.state === 'downloading'), true);
+  });
+
+  test.test('base32 BTIH 会规范成 WebTorrent 使用的 hex infoHash', () => {
+    const base32Magnet = 'magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const hexMagnet = 'magnet:?xt=urn:btih:0000000000000000000000000000000000000000';
+    const manager = createDownloadManager({ maxActive: 1, maxQueued: 3 });
+    const first = manager.enqueue(base32Magnet);
+    assert.equal(first.id, '0000000000000000000000000000000000000000');
+    assert.throws(() => manager.enqueue(hexMagnet), /下载或排队/);
+  });
+
+  test.test('清理任务索引会删除同一个任务的所有别名', () => {
+    const task = { id: '0000000000000000000000000000000000000000', magnet: '' };
+    torrentTasks.set('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', task);
+    torrentTasks.set(task.id, task);
+    addedAt.set('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', Date.now());
+    addedAt.set(task.id, Date.now());
+    cleanupTaskMaps(task.id);
+    assert.equal(torrentTasks.has('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), false);
+    assert.equal(torrentTasks.has(task.id), false);
+    assert.equal(addedAt.has('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), false);
   });
 }
 function renderPage() {
@@ -1273,7 +1384,9 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-listen('::');
+if (process.env.HY2_NODE_SELFTEST !== '1') {
+  listen('::');
+}
 EOF_NODE
 }
 
