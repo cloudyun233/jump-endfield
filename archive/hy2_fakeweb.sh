@@ -184,7 +184,7 @@ setup_cert_and_config() {
       "listen": "::",
       "listen_port": ${HY2_PORT},
       "users": [{ "password": "${UUID}" }],
-      "masquerade": "https://127.0.0.1:${HTTP_LISTEN_PORT}",
+      "masquerade": "http://127.0.0.1:${HTTP_LISTEN_PORT}",
       "tls": {
         "enabled": true,
         "server_name": "${HY2_SNI}",
@@ -223,7 +223,7 @@ print_info() {
   printf 'HY2 密码: %s\n' "$UUID"
   printf 'TLS SNI: %s\n' "$HY2_SNI"
   printf '允许不安全证书: true\n'
-  printf 'Web HTTPS: https://%s:%s/\n' "$TLS_CERT_IP" "$HTTP_LISTEN_PORT"
+  printf 'Web HTTP: http://%s:%s/\n' "$TLS_CERT_IP" "$HTTP_LISTEN_PORT"
   if [[ -n "${DOWNLOAD_KEY:-}" ]]; then
     printf 'Web 操作密钥 DOWNLOAD_KEY: %s\n' "$DOWNLOAD_KEY"
   else

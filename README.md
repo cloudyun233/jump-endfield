@@ -1,8 +1,6 @@
 # Moonroom
 
-Moonroom 是一个轻量私有影视 WebApp：NodeJS 一键启动 HTTPS Web、React 前端、磁力任务管理、视频在线播放、文件删除和访问密钥。页面默认只加载封面和状态，只有点击播放时才请求视频文件。
-
-界面提供 hanime1.me 外部入口。
+Moonroom 是一个轻量私有影视 WebApp：NodeJS 一键启动 HTTP Web、React 前端、磁力任务管理、视频在线播放、文件删除和访问密钥。页面默认只加载封面和状态，只有点击播放时才请求视频文件。
 
 ## 部署教程
 
@@ -44,7 +42,7 @@ dist/
 node /home/container/index.js
 ```
 
-`index.js` 会启动 HTTPS Web 服务，并在同目录调用：
+`index.js` 会启动 HTTP Web 服务，并在同目录调用：
 
 ```bash
 bash /home/container/hy2_fakeweb.sh
@@ -55,7 +53,6 @@ bash /home/container/hy2_fakeweb.sh
 在服务器面板中填写自己的值，不要把真实值提交到仓库：
 
 ```bash
-TLS_CERT_IP=YOUR_SERVER_IP
 HTTP_LISTEN_PORT=YOUR_PORT
 DOWNLOAD_MAX_ACTIVE=1
 DOWNLOAD_MAX_QUEUE=3
@@ -68,10 +65,8 @@ Web 操作密钥默认开启。首次启动会自动生成并持久化到 `.npm/
 启动后访问：
 
 ```text
-https://YOUR_SERVER_IP:YOUR_PORT/
+http://YOUR_SERVER_IP:YOUR_PORT/
 ```
-
-使用自签证书时，浏览器会提示证书不受信任，手动继续访问即可。
 
 ### 6. 更新前端
 

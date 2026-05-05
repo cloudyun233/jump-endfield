@@ -1,4 +1,4 @@
-import https from 'node:https';
+import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -9,8 +9,6 @@ const port = Number(process.env.HTTP_LISTEN_PORT || process.env.HY2_PORT || 2016
 const fileRoot = path.resolve(process.env.FILE_PATH || path.join(process.cwd(), '.npm/video'));
 const downloadRoot = path.resolve(process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads'));
 const frontendDist = path.resolve(process.env.FRONTEND_DIST_DIR || path.join(process.cwd(), 'dist'));
-const certPath = path.resolve(process.env.TLS_CERT_PATH || path.join(fileRoot, 'cert.pem'));
-const keyPath = path.resolve(process.env.TLS_KEY_PATH || path.join(fileRoot, 'private.key'));
 const downloadKeyFile = path.join(fileRoot, 'download_key.txt');
 const downloadKey = loadDownloadKey();
 const maxActive = Math.max(1, Number(process.env.DOWNLOAD_MAX_ACTIVE || 1));
@@ -20,9 +18,7 @@ const trackerListUrl = process.env.TRACKER_LIST_URL || 'https://cf.trackerslist.
 const trackerCacheFile = process.env.TRACKER_LIST_CACHE_FILE || path.join(fileRoot, 'trackers_all.txt');
 const visitorFile = path.join(fileRoot, 'weekly_visitors.json');
 const uploadRoot = path.join(fileRoot, 'uploads');
-const hanimeOrigin = 'https://hanime1.me';
 const uploadMaxBytes = Math.max(1, Number(process.env.UPLOAD_MAX_BYTES || 8 * 1024 * 1024 * 1024));
-const hanimeAssetPrefixes = ['/cdn-cgi/', '/assets/', '/packs/', '/js/', '/css/', '/images/', '/image/', '/uploads/', '/videos/', '/api/', '/ajax/'];
 const videoExts = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.ts', '.m3u8']);
 const skipDirs = new Set(['http_runtime', 'nginx_www', 'node_modules', '.git', '.cache', '.singbox_tmp']);
 const mime = {
@@ -97,82 +93,6 @@ function safeFileName(value) {
   const fallback = `upload-${new Date().toISOString().replace(/[:.]/g, '-')}.mp4`;
   const base = path.basename(String(value || fallback)).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
   return base || fallback;
-}
-
-function hasProxyBody(method) {
-  return !['GET', 'HEAD'].includes(String(method || '').toUpperCase());
-}
-
-function isHanimeProxyPath(pathname) {
-  return pathname === '/hanime' || pathname.startsWith('/hanime/') || hanimeAssetPrefixes.some((prefix) => pathname.startsWith(prefix));
-}
-
-function toHanimePath(value) {
-  if (!value) return value;
-  if (value.startsWith('/hanime/')) return value;
-  if (value.startsWith('//hanime1.me/')) return `/hanime/${value.slice('//hanime1.me/'.length)}`;
-  if (value.startsWith('//www.hanime1.me/')) return `/hanime/${value.slice('//www.hanime1.me/'.length)}`;
-  if (/^https?:\/\/hanime1\.me\//i.test(value)) return value.replace(/^https?:\/\/hanime1\.me/i, '/hanime');
-  if (/^https?:\/\/www\.hanime1\.me\//i.test(value)) return value.replace(/^https?:\/\/www\.hanime1\.me/i, '/hanime');
-  if (value.startsWith('/')) return hanimeAssetPrefixes.some((prefix) => value.startsWith(prefix)) ? value : `/hanime${value}`;
-  return value;
-}
-
-function rewriteHanimeText(text) {
-  return String(text || '')
-    .replace(/https?:\\\/\\\/www\\.hanime1\\.me/gi, '/hanime')
-    .replace(/https?:\\\/\\\/hanime1\\.me/gi, '/hanime')
-    .replace(/https?:\/\/www\.hanime1\.me/gi, '/hanime')
-    .replace(/https?:\/\/hanime1\.me/gi, '/hanime')
-    .replace(/(href|src|action)=(["'])\/(?!\/|hanime\/|media\/|thumb\/)/gi, '$1=$2/hanime/')
-    .replace(/(url\()(["']?)\/(?!\/|hanime\/|media\/|thumb\/)/gi, '$1$2/hanime/')
-    .replace(/(["'`])\/(?!\/|hanime\/|media\/|thumb\/)/g, '$1/hanime/');
-}
-
-function rewriteHanimeCookie(value) {
-  return String(value || '')
-    .replace(/;\s*domain=[^;]*/ig, '')
-    .replace(/;\s*secure/ig, '; Secure')
-    .replace(/;\s*path=\/[^;]*/ig, '; Path=/');
-}
-
-function buildHanimeHeaders(req, target) {
-  const headers = {};
-  const pass = ['accept', 'accept-language', 'cache-control', 'pragma', 'content-type', 'content-length'];
-  for (const name of pass) {
-    if (req.headers[name]) headers[name] = req.headers[name];
-  }
-  headers['User-Agent'] = req.headers['user-agent'] || 'Mozilla/5.0';
-  headers['Accept'] = headers.accept || '*/*';
-  headers['Accept-Language'] = headers['accept-language'] || 'zh-CN,zh;q=0.9';
-  headers['Accept-Encoding'] = 'identity';
-  headers.Host = target.host;
-  headers.Origin = target.origin;
-  headers.Referer = req.headers.referer ? toHanimeUpstream(req.headers.referer, target.origin) : target.origin;
-  if (req.headers.cookie) headers.Cookie = req.headers.cookie;
-  return headers;
-}
-
-function toHanimeUpstream(value, origin = hanimeOrigin) {
-  return String(value || '').replace(/https?:\/\/[^/]+\/hanime/gi, origin).replace(/https?:\/\/[^/]+\/cdn-cgi/gi, `${origin}/cdn-cgi`);
-}
-
-function rewriteHanimeHeaders(response) {
-  const headers = {
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'no-referrer-when-downgrade',
-  };
-  const type = response.headers.get('content-type');
-  if (type) headers['Content-Type'] = type;
-  const pass = ['accept-ranges', 'content-range', 'etag', 'last-modified'];
-  for (const name of pass) {
-    const value = response.headers.get(name);
-    if (value) headers[name] = value;
-  }
-  const cookies = response.headers.getSetCookie ? response.headers.getSetCookie() : [];
-  if (cookies.length) headers['Set-Cookie'] = cookies.map(rewriteHanimeCookie);
-  return headers;
 }
 
 function uniqueUploadPath(name) {
@@ -763,47 +683,6 @@ function serveThumb(req, res, id) {
   });
 }
 
-async function serveHanime(req, res, pathname) {
-  const url = new URL(req.url, 'https://127.0.0.1');
-  const suffix = pathname === '/hanime' ? '/' : pathname.startsWith('/hanime/') ? pathname.slice('/hanime'.length) || '/' : pathname;
-  const target = new URL(suffix, hanimeOrigin);
-  target.search = url.search;
-  try {
-    const response = await fetch(target, {
-      method: req.method,
-      redirect: 'manual',
-      duplex: hasProxyBody(req.method) ? 'half' : undefined,
-      headers: buildHanimeHeaders(req, target),
-      body: hasProxyBody(req.method) ? req : undefined,
-    });
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = toHanimePath(response.headers.get('location') || '/');
-      res.writeHead(response.status, { Location: location, 'Cache-Control': 'no-store' });
-      return res.end(), true;
-    }
-
-    const type = response.headers.get('content-type') || 'application/octet-stream';
-    const outHeaders = rewriteHanimeHeaders(response);
-    res.writeHead(response.status, outHeaders);
-    if (req.method === 'HEAD') return res.end(), true;
-    if (!response.body) return res.end(), true;
-
-    if (/\b(text\/html|text\/css|application\/javascript|text\/javascript|application\/json|application\/x-javascript)\b/i.test(type)) {
-      const body = rewriteHanimeText(await response.text());
-      res.end(body);
-      return true;
-    }
-
-    for await (const chunk of response.body) res.write(chunk);
-    res.end();
-    return true;
-  } catch (error) {
-    log('[Hanime] proxy failed', target.href, error?.message || error);
-    sendText(res, 502, 'Hanime proxy failed');
-    return true;
-  }
-}
-
 function serveMedia(req, res, id) {
   const rel = relFromId(id);
   const full = path.resolve(fileRoot, rel);
@@ -889,16 +768,10 @@ async function serveDist(req, res, pathname) {
   return true;
 }
 
-const server = https.createServer({
-  cert: fs.readFileSync(certPath),
-  key: fs.readFileSync(keyPath),
-  // 证书本身不区分 TLS 版本；这里限制 Web HTTPS 握手使用 TLS 1.3。
-  // sing-box 的 hysteria2/QUIC 同样复用这张证书。
-  minVersion: 'TLSv1.3',
-}, async (req, res) => {
+const server = http.createServer(async (req, res) => {
   let pathname = '/';
   try {
-    pathname = new URL(req.url, 'https://127.0.0.1').pathname;
+    pathname = new URL(req.url, 'http://127.0.0.1').pathname;
   } catch {
     return sendText(res, 400, 'Bad Request');
   }
@@ -922,9 +795,6 @@ const server = https.createServer({
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) recordVisit(req);
     if (await serveDist(req, res, pathname)) return;
 
-    if (isHanimeProxyPath(pathname)) {
-      if (await serveHanime(req, res, pathname)) return;
-    }
     return sendText(res, 404, 'Not Found');
   } catch (error) {
     console.error(error);
@@ -933,13 +803,13 @@ const server = https.createServer({
 });
 
 server.on('error', (error) => {
-  console.error('[HTTPS server error]', error);
+  console.error('[HTTP server error]', error);
   process.exit(1);
 });
 
 server.listen(port, '::', () => {
   log(
-    '[HTTPS] listening on',
+    '[HTTP] listening on',
     port,
     'frontend=',
     frontendDist,

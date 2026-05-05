@@ -457,7 +457,6 @@ export default function App() {
         <nav className="nav">
           <a href="#library">片库</a>
           <a href="#tasks">任务</a>
-          <a href="/hanime/" target="_blank" rel="noopener noreferrer">Hanime</a>
         </nav>
         <div className="visitor-pill">本周 {visitors.weeklyVisitors ?? '—'}</div>
       </header>
