@@ -27,7 +27,7 @@ const cssAssets = distAssets.filter((name) => name.endsWith('.css'));
 const bundledJs = jsAssets
   .map((name) => readFileSync(path.join(distRoot, 'assets', name), 'utf8'))
   .join('\n');
-assert(existsSync(distIndex), '用户上传入口 dist/index.html 已生成');
+assert(existsSync(distIndex), 'Web 入口 dist/index.html 已生成');
 assert(jsAssets.length > 0, 'React 业务脚本已打包到 dist/assets');
 assert(cssAssets.length > 0, '样式已打包到 dist/assets');
 assert(source.includes('preload="none"'), '视频标签使用 preload="none"');
@@ -44,11 +44,12 @@ assert(!source.includes('<iframe'), '源码不内嵌第三方 iframe');
 assert(!/location\.reload|window\.location/.test(source), '页面轮询不会触发浏览器整页刷新');
 assert(source.includes('pendingFilesRef'), '片库变化会在播放中暂存，避免替换播放器');
 assert(source.includes('video.src = serverAsset(file.url)'), '只有播放流程才挂载真实媒体地址');
-assert(source.includes('accept="video/*,.mp4,.m4v,.webm,.mkv,.mov,.avi,.ts,.m3u8"'), '上传控件限制选择视频文件');
-assert(source.includes("requestJson('/api/uploads'"), '前端通过上传接口提交本地视频');
-assert(source.includes("'X-File-Name': selectedUpload.name"), '上传接口传递原始文件名');
-assert(source.includes('inputRef.current.click()'), '上传按钮触发隐藏文件选择框');
+assert(!source.includes('/api/uploads'), '前端不再调用上传接口');
+assert(!source.includes('selectedUpload'), '前端不再保留上传选择状态');
+assert(!source.includes('type="file"'), '前端不再渲染文件上传控件');
+assert(!serverSource.includes('/api/uploads'), 'server.mjs 不再暴露上传接口');
+assert(!serverSource.includes('uploadFile'), 'server.mjs 不再包含上传处理函数');
 assert(bundledJs.includes('/api/status'), '打包产物包含状态接口调用');
 assert(bundledJs.includes('/api/downloads'), '打包产物包含下载任务接口调用');
-assert(bundledJs.includes('/api/uploads'), '打包产物包含上传接口调用');
+assert(!bundledJs.includes('/api/uploads'), '打包产物不再包含上传接口调用');
 assert(bundledJs.includes('/api/files/'), '打包产物包含删除影片接口调用');

@@ -282,16 +282,6 @@ h2 {
   align-items: center;
 }
 
-.action-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.file-input {
-  display: none;
-}
-
 .input,
 .select,
 .primary-btn,
@@ -356,11 +346,6 @@ h2 {
 
 .danger-btn {
   color: var(--danger);
-}
-
-.upload-btn:disabled {
-  cursor: wait;
-  opacity: 0.72;
 }
 
 .message {
@@ -714,7 +699,6 @@ video {
 
   .magnet-row,
   .key-row,
-  .action-row,
   .section-head,
   .tools,
   .stats,

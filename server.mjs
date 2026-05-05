@@ -17,8 +17,6 @@ const maxConns = Math.max(12, Number(process.env.DOWNLOAD_MAX_CONNS || 32));
 const trackerListUrl = process.env.TRACKER_LIST_URL || 'https://cf.trackerslist.com/all.txt';
 const trackerCacheFile = process.env.TRACKER_LIST_CACHE_FILE || path.join(fileRoot, 'trackers_all.txt');
 const visitorFile = path.join(fileRoot, 'weekly_visitors.json');
-const uploadRoot = path.join(fileRoot, 'uploads');
-const uploadMaxBytes = Math.max(1, Number(process.env.UPLOAD_MAX_BYTES || 8 * 1024 * 1024 * 1024));
 const videoExts = new Set(['.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.ts', '.m3u8']);
 const skipDirs = new Set(['http_runtime', 'nginx_www', 'node_modules', '.git', '.cache', '.singbox_tmp']);
 const mime = {
@@ -60,7 +58,6 @@ const staticMime = {
 };
 
 await fsp.mkdir(downloadRoot, { recursive: true });
-await fsp.mkdir(uploadRoot, { recursive: true });
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -87,24 +84,6 @@ function relFromId(id) {
   } catch {
     return '';
   }
-}
-
-function safeFileName(value) {
-  const fallback = `upload-${new Date().toISOString().replace(/[:.]/g, '-')}.mp4`;
-  const base = path.basename(String(value || fallback)).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
-  return base || fallback;
-}
-
-function uniqueUploadPath(name) {
-  const ext = path.extname(name);
-  const stem = path.basename(name, ext);
-  let full = path.join(uploadRoot, name);
-  let index = 1;
-  while (fs.existsSync(full)) {
-    full = path.join(uploadRoot, `${stem}-${index}${ext}`);
-    index += 1;
-  }
-  return full;
 }
 
 function inside(root, target) {
@@ -607,45 +586,6 @@ async function delTask(req, res, id) {
   }
 }
 
-async function uploadFile(req, res) {
-  if (!authorized(req)) return sendJson(res, 401, { ok: false, error: '访问密钥错误' });
-  const declared = Number(req.headers['content-length'] || 0);
-  if (declared > uploadMaxBytes) return sendJson(res, 413, { ok: false, error: `文件过大：最大 ${human(uploadMaxBytes)}` });
-  const name = safeFileName(req.headers['x-file-name']);
-  const ext = path.extname(name).toLowerCase();
-  if (!videoExts.has(ext)) return sendJson(res, 400, { ok: false, error: '仅支持上传视频文件' });
-  const full = uniqueUploadPath(name);
-  const tmp = `${full}.${crypto.randomUUID()}.tmp`;
-  let written = 0;
-  try {
-    await new Promise((resolve, reject) => {
-      const out = fs.createWriteStream(tmp, { flags: 'wx', mode: 0o600 });
-      req.on('data', (chunk) => {
-        written += chunk.length;
-        if (written > uploadMaxBytes) {
-          out.destroy(new Error(`文件过大：最大 ${human(uploadMaxBytes)}`));
-          req.destroy();
-        }
-      });
-      req.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', resolve);
-      req.pipe(out);
-    });
-    if (!written) throw new Error('文件为空');
-    await fsp.rename(tmp, full);
-    const rel = path.relative(fileRoot, full).split(path.sep).join('/');
-    log('[Library] upload file', rel, 'size=', written);
-    return sendJson(res, 201, { ok: true, file: { id: idFromRel(rel), name: path.basename(full), rel, size: written, sizeText: human(written) } });
-  } catch (error) {
-    try {
-      await fsp.unlink(tmp);
-    } catch {}
-    log('[Library] upload failed', name, error?.message || error);
-    return sendJson(res, 500, { ok: false, error: error?.message || String(error) });
-  }
-}
-
 async function delFile(req, res, id) {
   if (!authorized(req)) return sendJson(res, 401, { ok: false, error: '访问密钥错误' });
   const rel = relFromId(id);
@@ -779,7 +719,6 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && pathname === '/api/status') return sendJson(res, 200, await status());
     if (req.method === 'POST' && pathname === '/api/downloads') return addMagnet(req, res);
-    if (req.method === 'POST' && pathname === '/api/uploads') return uploadFile(req, res);
     if (req.method === 'DELETE' && pathname.startsWith('/api/downloads/')) {
       return delTask(req, res, decodeURIComponent(pathname.slice('/api/downloads/'.length)));
     }
@@ -817,8 +756,6 @@ server.listen(port, '::', () => {
     fileRoot,
     'download=',
     downloadRoot,
-    'upload=',
-    uploadRoot,
     'auth=',
     !!downloadKey,
     'DOWNLOAD_KEY=',
