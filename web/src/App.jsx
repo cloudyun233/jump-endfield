@@ -203,6 +203,8 @@ function TaskItem({ task, onDelete }) {
 export default function App() {
   const [accessKey, setAccessKey] = useState(() => readLocal(KEY_STORAGE, ''));
   const [magnet, setMagnet] = useState('');
+  const [selectedUpload, setSelectedUpload] = useState(null);
+  const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState({ text: '', bad: false });
   const [status, setStatus] = useState(null);
   const [files, setFiles] = useState([]);
@@ -212,6 +214,7 @@ export default function App() {
   const [recentIds, setRecentIds] = useState(() => readLocal(RECENT_STORAGE, []));
   const [progressMap, setProgressMap] = useState(() => readLocal(PROGRESS_STORAGE, {}));
 
+  const inputRef = useRef(null);
   const fileSigRef = useRef('');
   const pendingFilesRef = useRef(null);
   const playingIdsRef = useRef(new Set());
@@ -328,6 +331,39 @@ export default function App() {
     }
   }, [authHeaders, magnet, refreshStatus, showMessage]);
 
+  const chooseUpload = useCallback(() => {
+    if (inputRef.current) inputRef.current.click();
+  }, []);
+
+  const uploadFile = useCallback(async () => {
+    if (!selectedUpload) {
+      chooseUpload();
+      return;
+    }
+
+    try {
+      setUploading(true);
+      showMessage(`正在上传 ${selectedUpload.name}...`);
+      await requestJson('/api/uploads', {
+        method: 'POST',
+        headers: {
+          'Content-Type': selectedUpload.type || 'application/octet-stream',
+          'X-File-Name': selectedUpload.name,
+          ...authHeaders,
+        },
+        body: selectedUpload,
+      });
+      setSelectedUpload(null);
+      if (inputRef.current) inputRef.current.value = '';
+      showMessage('上传完成');
+      await refreshStatus(true);
+    } catch (error) {
+      showMessage(error.message || '上传失败', true);
+    } finally {
+      setUploading(false);
+    }
+  }, [authHeaders, chooseUpload, refreshStatus, selectedUpload, showMessage]);
+
   const deleteTask = useCallback(async (id) => {
     try {
       await requestJson(`/api/downloads/${encodeURIComponent(id)}`, {
@@ -421,7 +457,7 @@ export default function App() {
         <nav className="nav">
           <a href="#library">片库</a>
           <a href="#tasks">任务</a>
-          <a href="https://hanime1.me/" target="_blank" rel="noopener noreferrer">Hanime</a>
+          <a href="/hanime/" target="_blank" rel="noopener noreferrer">Hanime</a>
         </nav>
         <div className="visitor-pill">本周 {visitors.weeklyVisitors ?? '—'}</div>
       </header>
@@ -443,7 +479,17 @@ export default function App() {
               }}
               placeholder="magnet:?xt=urn:btih:..."
             />
-            <button className="primary-btn" type="button" onClick={addMagnet}>开始下载</button>
+            <div className="action-row">
+              <button className="primary-btn" type="button" onClick={addMagnet}>开始下载</button>
+              <button className="ghost-btn upload-btn" type="button" onClick={selectedUpload ? uploadFile : chooseUpload} disabled={uploading}>{uploading ? '上传中' : '上传'}</button>
+            </div>
+            <input
+              ref={inputRef}
+              className="file-input"
+              type="file"
+              accept="video/*,.mp4,.m4v,.webm,.mkv,.mov,.avi,.ts,.m3u8"
+              onChange={(event) => setSelectedUpload(event.target.files?.[0] || null)}
+            />
           </div>
           <div className="key-row">
             <input
@@ -453,7 +499,7 @@ export default function App() {
               onChange={(event) => setAccessKey(event.target.value)}
               placeholder="访问密钥"
             />
-            <div className={message.bad ? 'message bad' : 'message'}>{message.text || '状态就绪'}</div>
+            <div className={message.bad ? 'message bad' : 'message'}>{selectedUpload ? `待上传：${selectedUpload.name}` : (message.text || '状态就绪')}</div>
           </div>
         </div>
       </section>

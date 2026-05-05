@@ -1,8 +1,14 @@
 #!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const { spawn, spawnSync } = require('child_process');
+
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import { spawn, spawnSync } from 'child_process';
+import { fileURLToPath } from 'url';
+
+// 计算 __dirname 的 ES 模块等价写法
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const root = __dirname;
 const fileRoot = process.env.FILE_PATH || path.join(root, '.npm', 'video');
@@ -41,8 +47,6 @@ function ensureCertificate() {
     return;
   }
 
-  // Web 和 sing-box 共用这张证书。这里用最朴素的 RSA-2048 自签证书，
-  // 并把服务器 IP 写进 SAN，浏览器和 HY2 客户端看到的证书身份保持一致。
   log(`generate self-signed TLS certificate for IP ${certIp}`);
   const openssl = process.platform === 'win32' ? 'openssl.exe' : 'openssl';
   run(openssl, [
@@ -71,7 +75,6 @@ function ensureWebTorrentRuntime() {
     return;
   }
 
-  // 面板里不用再填 ADDITIONAL NODE PACKAGES；入口脚本会把后端依赖装到持久目录。
   log('install WebTorrent runtime package');
   fs.writeFileSync(
     path.join(runtimeDir, 'package.json'),
@@ -155,11 +158,9 @@ function main() {
     DOWNLOAD_KEY: downloadKey,
   };
 
-  // Node 负责 HTTPS Web、React dist、WebTorrent API、/media Range。
   log(`spawn web server: ${runtimeServer}`);
   spawnChild('web', process.execPath, [runtimeServer], sharedEnv);
 
-  // Bash 脚本负责 sing-box / HY2。
   log(`spawn HY2 runtime script: ${runtimeScript}`);
   spawnChild('runtime', 'bash', [runtimeScript], sharedEnv);
 }
