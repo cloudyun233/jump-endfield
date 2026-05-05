@@ -160,7 +160,33 @@ install_singbox() {
 setup_cert_and_config() {
   section "生成证书和 sing-box 配置"
 
+  local need_generate=0
+  local early_renew_days="${TLS_EARLY_RENEW_DAYS:-30}"
   if [ ! -f "$TLS_KEY_PATH" ] || [ ! -f "$TLS_CERT_PATH" ]; then
+    need_generate=1
+  else
+    if have_cmd openssl; then
+      local not_after_sec now_sec diff_sec renew_sec
+      not_after_sec="$(openssl x509 -noout -dates -in "$TLS_CERT_PATH" 2>/dev/null | grep notAfter | cut -d= -f2 | xargs date -d +%s 2>/dev/null || echo 0)"
+      if [ "$not_after_sec" -eq 0 ]; then
+        log "WARN" "无法读取证书有效期，强制重新生成"
+        need_generate=1
+      else
+        now_sec="$(date +%s)"
+        renew_sec="$(( early_renew_days * 86400 ))"
+        diff_sec="$(( not_after_sec - now_sec ))"
+        if [ "$diff_sec" -le "$renew_sec" ]; then
+          log "INFO" "证书将在 $(( diff_sec / 86400 )) 天后过期（或已过期），提前 $early_renew_days 天重新生成"
+          need_generate=1
+        fi
+      fi
+    fi
+    if [ "$need_generate" -eq 0 ]; then
+      log "INFO" "复用已有 TLS 证书：$TLS_CERT_PATH"
+    fi
+  fi
+
+  if [ "$need_generate" -eq 1 ]; then
     if ! have_cmd openssl; then
       log "ERROR" "未找到 openssl，无法生成证书"
       exit 1
@@ -203,14 +229,12 @@ subjectAltName = @alt_names
 [alt_names]
 ${san_entries}
 EOF_OPENSSL
-    log "INFO" "生成 RSA-2048 自签证书：CN=$TLS_CERT_CN SAN=IP:$TLS_CERT_IP DNS:$TLS_CERT_DNS 位置=FR/Hauts-de-France/Roubaix"
-    openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 \
+    log "INFO" "生成 ECDSA prime256v1 自签证书：CN=$TLS_CERT_CN SAN=IP:$TLS_CERT_IP DNS:$TLS_CERT_DNS 位置=FR/Hauts-de-France/Roubaix"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -sha256 -nodes -days 365 \
       -keyout "$TLS_KEY_PATH" \
       -out "$TLS_CERT_PATH" \
       -config "$openssl_conf"
     rm -f "$openssl_conf"
-  else
-    log "INFO" "复用已有 TLS 证书：$TLS_CERT_PATH"
   fi
   chmod 600 "$TLS_KEY_PATH" || true
 
