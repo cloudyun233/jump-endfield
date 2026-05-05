@@ -9,6 +9,8 @@ export HY2_PORT="${HY2_PORT:-20164}"
 export HTTP_LISTEN_PORT="${HTTP_LISTEN_PORT:-$HY2_PORT}"
 export TLS_CERT_IP="${TLS_CERT_IP:-51.75.118.151}"
 export HY2_SNI="${HY2_SNI:-$TLS_CERT_IP}"
+export TLS_CERT_CN="${TLS_CERT_CN:-$TLS_CERT_IP}"
+export TLS_CERT_DNS="${TLS_CERT_DNS:-$HY2_SNI}"
 export TLS_CERT_PATH="${TLS_CERT_PATH:-${FILE_PATH}/cert.pem}"
 export TLS_KEY_PATH="${TLS_KEY_PATH:-${FILE_PATH}/private.key}"
 export SINGBOX_BIN="${SINGBOX_BIN:-${FILE_PATH}/sing-box}"
@@ -163,12 +165,50 @@ setup_cert_and_config() {
       log "ERROR" "未找到 openssl，无法生成证书"
       exit 1
     fi
-    log "INFO" "生成最简单 RSA-2048 自签证书：IP SAN=$TLS_CERT_IP"
+    local openssl_conf san_entries
+    openssl_conf="$(mktemp)"
+    san_entries="IP.1 = ${TLS_CERT_IP}"
+    if [ -n "${TLS_CERT_DNS:-}" ] && [ "$TLS_CERT_DNS" != "$TLS_CERT_IP" ]; then
+      san_entries="${san_entries}
+DNS.1 = ${TLS_CERT_DNS}"
+    fi
+    cat > "$openssl_conf" <<EOF_OPENSSL
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+req_extensions = req_ext
+x509_extensions = v3_ext
+
+[dn]
+C = FR
+ST = Hauts-de-France
+L = Roubaix
+O = Roubaix Network Services
+OU = Edge Web Runtime
+CN = ${TLS_CERT_CN}
+
+[req_ext]
+subjectAltName = @alt_names
+
+[v3_ext]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+${san_entries}
+EOF_OPENSSL
+    log "INFO" "生成 RSA-2048 自签证书：CN=$TLS_CERT_CN SAN=IP:$TLS_CERT_IP DNS:$TLS_CERT_DNS 位置=FR/Hauts-de-France/Roubaix"
     openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 \
       -keyout "$TLS_KEY_PATH" \
       -out "$TLS_CERT_PATH" \
-      -subj "/CN=${TLS_CERT_IP}" \
-      -addext "subjectAltName=IP:${TLS_CERT_IP}"
+      -config "$openssl_conf"
+    rm -f "$openssl_conf"
   else
     log "INFO" "复用已有 TLS 证书：$TLS_CERT_PATH"
   fi
@@ -223,7 +263,7 @@ print_info() {
   printf 'HY2 密码: %s\n' "$UUID"
   printf 'TLS SNI: %s\n' "$HY2_SNI"
   printf '允许不安全证书: true\n'
-  printf 'Web HTTP: http://%s:%s/\n' "$TLS_CERT_IP" "$HTTP_LISTEN_PORT"
+  printf 'Web HTTPS: https://%s:%s/\n' "$TLS_CERT_IP" "$HTTP_LISTEN_PORT"
   if [[ -n "${DOWNLOAD_KEY:-}" ]]; then
     printf 'Web 操作密钥 DOWNLOAD_KEY: %s\n' "$DOWNLOAD_KEY"
   else

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -9,6 +10,8 @@ const port = Number(process.env.HTTP_LISTEN_PORT || process.env.HY2_PORT || 2016
 const fileRoot = path.resolve(process.env.FILE_PATH || path.join(process.cwd(), '.npm/video'));
 const downloadRoot = path.resolve(process.env.DOWNLOAD_DIR || path.join(fileRoot, 'downloads'));
 const frontendDist = path.resolve(process.env.FRONTEND_DIST_DIR || path.join(process.cwd(), 'dist'));
+const tlsCertPath = path.resolve(process.env.TLS_CERT_PATH || path.join(fileRoot, 'cert.pem'));
+const tlsKeyPath = path.resolve(process.env.TLS_KEY_PATH || path.join(fileRoot, 'private.key'));
 const downloadKeyFile = path.join(fileRoot, 'download_key.txt');
 const downloadKey = loadDownloadKey();
 const maxActive = Math.max(1, Number(process.env.DOWNLOAD_MAX_ACTIVE || 1));
@@ -64,6 +67,19 @@ await fsp.mkdir(downloadRoot, { recursive: true });
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
+}
+
+function loadTlsOptions() {
+  if (!fs.existsSync(tlsCertPath) || !fs.existsSync(tlsKeyPath)) return null;
+  try {
+    return {
+      cert: fs.readFileSync(tlsCertPath),
+      key: fs.readFileSync(tlsKeyPath),
+    };
+  } catch (error) {
+    log('[TLS] load failed:', error?.message || error);
+    return null;
+  }
 }
 
 function human(n) {
@@ -813,7 +829,9 @@ async function serveDist(req, res, pathname) {
   return true;
 }
 
-const server = http.createServer(async (req, res) => {
+const tlsOptions = loadTlsOptions();
+const protocol = tlsOptions ? 'HTTPS' : 'HTTP';
+const server = (tlsOptions ? https : http).createServer(tlsOptions || undefined, async (req, res) => {
   let pathname = '/';
   try {
     pathname = new URL(req.url, 'http://127.0.0.1').pathname;
@@ -856,13 +874,13 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.on('error', (error) => {
-  console.error('[HTTP server error]', error);
+  console.error(`[${protocol} server error]`, error);
   process.exit(1);
 });
 
 server.listen(port, '::', () => {
   log(
-    '[HTTP] listening on',
+    `[${protocol}] listening on`,
     port,
     'frontend=',
     frontendDist,
@@ -870,6 +888,8 @@ server.listen(port, '::', () => {
     fileRoot,
     'download=',
     downloadRoot,
+    'tlsCert=',
+    tlsOptions ? tlsCertPath : '未启用',
     'auth=',
     !!downloadKey,
     'DOWNLOAD_KEY=',
