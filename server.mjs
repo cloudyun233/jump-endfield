@@ -14,6 +14,9 @@ const downloadKey = loadDownloadKey();
 const maxActive = Math.max(1, Number(process.env.DOWNLOAD_MAX_ACTIVE || 1));
 const maxQueued = Math.max(0, Number(process.env.DOWNLOAD_MAX_QUEUE || 3));
 const maxConns = Math.max(12, Number(process.env.DOWNLOAD_MAX_CONNS || 32));
+const seedUploadLimit = Math.max(0, Number(process.env.SEED_UPLOAD_LIMIT || 500 * 1024));
+const seedMaxTime = Math.max(0, Number(process.env.SEED_MAX_TIME || 0)) * 3600_000;
+const seedMaxRatio = Number(process.env.SEED_MAX_RATIO || 0) || 0;
 const trackerListUrl = process.env.TRACKER_LIST_URL || 'https://cf.trackerslist.com/all.txt';
 const trackerCacheFile = process.env.TRACKER_LIST_CACHE_FILE || path.join(fileRoot, 'trackers_all.txt');
 const visitorFile = path.join(fileRoot, 'weekly_visitors.json');
@@ -206,6 +209,7 @@ if (client) log('[WebTorrent] ready', 'maxActive=', maxActive, 'maxQueued=', max
 
 const queued = [];
 const failed = new Map();
+const seedingTorrents = new Map();
 const addedAt = new Map();
 const base32Chars = 'abcdefghijklmnopqrstuvwxyz234567';
 
@@ -253,21 +257,37 @@ function torrentView(torrent) {
   const downloaded = Number(torrent.downloaded || 0);
   const length = Number(torrent.length || 0);
   const downloadSpeed = Number(torrent.downloadSpeed || 0);
+  const seed = seedingTorrents.get(id);
+  const isSeeding = !!seed && torrent.done;
+  const seedUploaded = seed ? Number(torrent.uploaded || 0) - seed.uploadedAtStart : 0;
+  const seedTime = seed ? Math.round((Date.now() - seed.startedAt) / 1000) : 0;
+  const ratio = (downloaded || 1) ? (seedUploaded / (downloaded || 1)) : 0;
+
   return {
     id,
     infoHash: id,
     name: torrent.name || `下载任务 ${id.slice(0, 8)}`,
-    state: torrent.done ? 'done' : 'downloading',
+    state: isSeeding ? 'seeding' : torrent.done ? 'done' : 'downloading',
     progress: Number.isFinite(torrent.progress) ? Math.round(torrent.progress * 1000) / 10 : 0,
     downloaded,
     length,
     downloadSpeed,
+    uploadSpeed: Number(torrent.uploadSpeed || 0),
     downloadedText: human(downloaded),
     lengthText: length ? human(length) : '获取元数据中',
     downloadSpeedText: `${human(downloadSpeed)}/s`,
+    uploadSpeedText: `${human(torrent.uploadSpeed || 0)}/s`,
     peers: torrent.numPeers || 0,
     addedAt: addedAt.get(id) || Date.now(),
     error: '',
+    seedUploaded,
+    seedUploadedText: human(seedUploaded),
+    seedTime,
+    seedTimeText: seedTime >= 3600
+      ? `${Math.floor(seedTime / 3600)}h${Math.floor((seedTime % 3600) / 60)}m`
+      : `${Math.floor(seedTime / 60)}m${seedTime % 60}s`,
+    ratio: Number.isFinite(ratio) ? ratio : 0,
+    ratioText: ratio >= 1 ? ratio.toFixed(2) : ratio.toFixed(3),
   };
 }
 
@@ -348,9 +368,7 @@ function attachTorrent(torrent, id, at) {
     const hash = remember();
     log('[Torrent] done', hash, 'name=', torrent.name || '', 'downloaded=', torrent.downloaded || 0);
     addedAt.delete(hash);
-    try {
-      client.remove(torrent, { destroyStore: false }, () => {});
-    } catch {}
+    startSeeding(hash, torrent);
     startQueue();
   });
   torrent.once('error', (error) => {
@@ -370,6 +388,78 @@ function startMagnet(magnet, id, at) {
   addedAt.set(normId(torrent.infoHash || id), at);
   attachTorrent(torrent, id, at);
   return torrent;
+}
+
+function startSeeding(id, torrent) {
+  const uploadedSnapshot = Number(torrent.uploaded || 0);
+  const seed = {
+    torrent,
+    startedAt: Date.now(),
+    uploadedAtStart: uploadedSnapshot,
+  };
+  seedingTorrents.set(id, seed);
+  log('[Seed] start', id, 'name=', torrent.name || '', 'uploadLimit=', human(seedUploadLimit) + '/s');
+
+  if (seedMaxTime) {
+    seed.maxTimer = setTimeout(() => {
+      log('[Seed] max time reached', id);
+      stopSeeding(id);
+    }, seedMaxTime);
+  }
+
+  seed.throttleTimer = setTimeout(() => throttleUpload(id, seed), 1000);
+}
+
+function throttleUpload(id, seed) {
+  if (seed.torrent.destroyed) {
+    seedingTorrents.delete(id);
+    return;
+  }
+
+  if (seedMaxRatio) {
+    const uploaded = Number(seed.torrent.uploaded || 0) - seed.uploadedAtStart;
+    const downloaded = Number(seed.torrent.downloaded || 1);
+    if (uploaded / downloaded >= seedMaxRatio) {
+      log('[Seed] max ratio reached', id, 'ratio=', (uploaded / downloaded).toFixed(2));
+      stopSeeding(id);
+      return;
+    }
+  }
+
+  if (seedUploadLimit > 0) {
+    const speed = Number(seed.torrent.uploadSpeed || 0);
+    if (speed > seedUploadLimit) {
+      const pauseMs = Math.round(1000 * (1 - seedUploadLimit / speed));
+      seed.torrent.pause();
+      seed.pauseTimer = setTimeout(() => {
+        if (!seed.torrent.destroyed) seed.torrent.resume();
+      }, Math.min(pauseMs, 950));
+      seed.throttleTimer = setTimeout(() => throttleUpload(id, seed), Math.max(pauseMs, 100));
+      return;
+    }
+    if (seed.torrent.paused) seed.torrent.resume();
+  }
+
+  seed.throttleTimer = setTimeout(() => throttleUpload(id, seed), 1000);
+}
+
+function stopSeeding(id) {
+  const seed = seedingTorrents.get(id);
+  if (!seed) return;
+  seedingTorrents.delete(id);
+
+  clearTimeout(seed.throttleTimer);
+  clearTimeout(seed.pauseTimer);
+  clearTimeout(seed.maxTimer);
+
+  const uploaded = Number(seed.torrent.uploaded || 0) - seed.uploadedAtStart;
+  const downloaded = Number(seed.torrent.downloaded || 1);
+  const seedTime = Math.round((Date.now() - seed.startedAt) / 1000);
+  log('[Seed] stop', id, 'uploaded=', human(uploaded), 'ratio=', (uploaded / downloaded).toFixed(2), 'time=', seedTime + 's');
+
+  try {
+    client.remove(seed.torrent, { destroyStore: false }, () => {});
+  } catch {}
 }
 
 function activeVideoRels() {
@@ -480,11 +570,12 @@ async function status() {
   const files = await walk();
   const spaceInfo = await space();
   const torrents = [
-    ...liveTorrents().map(torrentView),
+    ...allTorrents().map(torrentView),
     ...queued.map(queuedView),
     ...failed.entries(),
   ].map((item) => (Array.isArray(item) ? failedView(item) : item)).sort((a, b) => b.addedAt - a.addedAt);
   const totalDownloadSpeed = torrents.reduce((sum, item) => sum + Number(item.downloadSpeed || 0), 0);
+  const totalUploadSpeed = torrents.reduce((sum, item) => sum + Number(item.uploadSpeed || 0), 0);
 
   return {
     ok: true,
@@ -495,15 +586,24 @@ async function status() {
     maxQueued,
     trackers: announceList.length,
     visitors: { weekKey: visitors.weekKey, weeklyVisitors: visitorSet.size },
+    seedConfig: {
+      uploadLimit: seedUploadLimit,
+      uploadLimitText: human(seedUploadLimit) + '/s',
+      maxTime: seedMaxTime ? Math.round(seedMaxTime / 3600_000) : 0,
+      maxRatio: seedMaxRatio,
+    },
     summary: {
       fileCount: files.length,
       taskCount: torrents.length,
       downloadingCount: torrents.filter((item) => item.state === 'downloading').length,
       queuedCount: torrents.filter((item) => item.state === 'queued').length,
       failedCount: torrents.filter((item) => item.state === 'failed').length,
+      seedingCount: torrents.filter((item) => item.state === 'seeding').length,
       doneCount: torrents.filter((item) => item.state === 'done').length,
       totalDownloadSpeed,
       totalDownloadSpeedText: `${human(totalDownloadSpeed)}/s`,
+      totalUploadSpeed,
+      totalUploadSpeedText: `${human(totalUploadSpeed)}/s`,
     },
     files,
     space: spaceInfo,
@@ -575,6 +675,11 @@ async function delTask(req, res, id) {
   if (!torrent) {
     log('[Download] delete task not found', id);
     return sendJson(res, 404, { ok: false, error: '未找到任务' });
+  }
+  if (seedingTorrents.has(id)) {
+    stopSeeding(id);
+    log('[Download] delete seeding task', id);
+    return sendJson(res, 200, { ok: true });
   }
   try {
     client.remove(torrent, { destroyStore: false }, () => startQueue());
@@ -721,6 +826,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/downloads') return addMagnet(req, res);
     if (req.method === 'DELETE' && pathname.startsWith('/api/downloads/')) {
       return delTask(req, res, decodeURIComponent(pathname.slice('/api/downloads/'.length)));
+    }
+    if (req.method === 'POST' && pathname.startsWith('/api/seed/stop/')) {
+      if (!authorized(req)) return sendJson(res, 401, { ok: false, error: '访问密钥错误' });
+      const seedId = decodeURIComponent(pathname.slice('/api/seed/stop/'.length));
+      if (seedingTorrents.has(seedId)) {
+        stopSeeding(seedId);
+        return sendJson(res, 200, { ok: true });
+      }
+      return sendJson(res, 404, { ok: false, error: '未找到做种任务' });
     }
     if (req.method === 'DELETE' && pathname.startsWith('/api/files/')) {
       return delFile(req, res, decodeURIComponent(pathname.slice('/api/files/'.length)));

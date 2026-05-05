@@ -74,6 +74,7 @@ function taskStateText(state) {
     queued: '排队中',
     failed: '失败',
     done: '完成',
+    seeding: '做种中',
   }[state] || state || '未知';
 }
 
@@ -179,19 +180,32 @@ function VideoCard({ file, savedProgress, isRecent, onDelete, onPlayed, onPlayba
   );
 }
 
-function TaskItem({ task, onDelete }) {
+function TaskItem({ task, onDelete, onStopSeed }) {
   const isBad = task.state === 'failed';
+  const isSeed = task.state === 'seeding';
 
   return (
-    <div className={isBad ? 'task task-bad' : 'task'}>
+    <div className={isBad ? 'task task-bad' : isSeed ? 'task task-seed' : 'task'}>
       <div className="task-head">
         <b className="task-title" title={task.name}>{task.name}</b>
-        <button className="ghost-btn" type="button" onClick={() => onDelete(task.id)}>移除</button>
+        <div className="task-head-actions">
+          {isSeed && (
+            <button className="ghost-btn seed-stop-btn" type="button" onClick={() => onStopSeed(task.id)}>停止做种</button>
+          )}
+          <button className="ghost-btn" type="button" onClick={() => onDelete(task.id)}>移除</button>
+        </div>
       </div>
       <div className="task-line">
-        {taskStateText(task.state)} · {task.downloadedText} / {task.lengthText}
+        {taskStateText(task.state)} · {isSeed ? task.downloadedText : `${task.downloadedText} / ${task.lengthText}`}
       </div>
-      <div className="task-line">{task.downloadSpeedText} · {task.peers} 连接</div>
+      {isSeed ? (
+        <>
+          <div className="task-line">上传 {task.uploadSpeedText} · {task.peers} 连接</div>
+          <div className="task-line">已上传 {task.seedUploadedText} · 做种 {task.seedTimeText} · 分享率 {task.ratioText}</div>
+        </>
+      ) : (
+        <div className="task-line">{task.downloadSpeedText} · {task.peers} 连接</div>
+      )}
       {task.error ? <div className="bad">{task.error}</div> : null}
       <div className="bar">
         <div className="fill" style={{ width: percent(task.progress) }} />
@@ -340,6 +354,19 @@ export default function App() {
     }
   }, [authHeaders, refreshStatus, showMessage]);
 
+  const stopSeeding = useCallback(async (id) => {
+    try {
+      await requestJson(`/api/seed/stop/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        headers: authHeaders,
+      });
+      showMessage('已停止做种');
+      await refreshStatus();
+    } catch (error) {
+      showMessage(error.message || '停止做种失败', true);
+    }
+  }, [authHeaders, refreshStatus, showMessage]);
+
   const deleteFile = useCallback(async (id) => {
     if (!window.confirm('确认删除这个影片文件？')) return;
 
@@ -406,7 +433,9 @@ export default function App() {
   const activeTasks = summary.downloadingCount ?? tasks.filter((task) => task.state === 'downloading').length;
   const queuedTasks = summary.queuedCount ?? tasks.filter((task) => task.state === 'queued').length;
   const failedTasks = summary.failedCount ?? tasks.filter((task) => task.state === 'failed').length;
+  const seedingTasks = summary.seedingCount ?? tasks.filter((task) => task.state === 'seeding').length;
   const totalSpeed = summary.totalDownloadSpeedText || '0 B/s';
+  const totalUpload = summary.totalUploadSpeedText || '0 B/s';
 
   return (
     <main className="page">
@@ -459,8 +488,9 @@ export default function App() {
 
       <section className="stats">
         <Stat label="影片" value={summary.fileCount ?? files.length} detail={space.libraryText || '—'} />
-        <Stat label="任务" value={`${activeTasks} / ${queuedTasks}`} detail={`${failedTasks} 失败`} />
-        <Stat label="速度" value={totalSpeed} detail={`${status?.trackers ?? '—'} tracker`} />
+        <Stat label="任务" value={`${activeTasks} / ${queuedTasks}`} detail={`${seedingTasks} 做种 · ${failedTasks} 失败`} />
+        <Stat label="下载" value={totalSpeed} />
+        <Stat label="上传" value={totalUpload} detail={`${status?.trackers ?? '—'} tracker`} />
         <div className="stat">
           <span>空间</span>
           <b>{space.availableText || '—'}</b>
@@ -516,7 +546,7 @@ export default function App() {
               <span>{tasks.length}</span>
             </div>
             {tasks.length ? tasks.map((task) => (
-              <TaskItem key={task.id} task={task} onDelete={deleteTask} />
+              <TaskItem key={task.id} task={task} onDelete={deleteTask} onStopSeed={stopSeeding} />
             )) : <Empty>暂无任务。</Empty>}
           </section>
 

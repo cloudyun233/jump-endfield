@@ -601,6 +601,25 @@ video {
   border-color: rgba(255, 119, 119, 0.52);
 }
 
+.task-seed {
+  border-left: 3px solid var(--accent-strong);
+}
+
+.task-head-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.seed-stop-btn {
+  color: var(--accent-strong);
+}
+
+.seed-stop-btn:hover {
+  color: rgb(255, 140, 80);
+}
+
 .task-title {
   max-width: min(220px, 64vw);
 }
